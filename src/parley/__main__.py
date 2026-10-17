@@ -1,6 +1,8 @@
 import argparse
 import logging
+import logging.handlers
 import os
+import queue
 import sys
 import time
 from pathlib import Path
@@ -116,9 +118,6 @@ def main() -> None:
         handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
     # Write log lines from a background thread: if the console stops accepting output (text
     # selected, Pause pressed), only logging waits, never listening, thinking or speaking
-    import logging.handlers
-    import queue
-
     log_queue: queue.Queue = queue.Queue()
     logging.handlers.QueueListener(log_queue, *root.handlers, respect_handler_level=True).start()
     root.handlers = [logging.handlers.QueueHandler(log_queue)]
