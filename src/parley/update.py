@@ -272,7 +272,9 @@ class _Paced:
 
     def iter_bytes(self, chunk_size: int | None = None):
         got = 0
-        for chunk in self._r.iter_bytes(chunk_size):
+        # No chunk size: httpx then yields each piece as it arrives. A fixed size would buffer until it is full, so a
+        # trickling server would never reach the checks below. `chunk_size` is accepted for compatibility only.
+        for chunk in self._r.iter_bytes():
             got += len(chunk)
             elapsed = time.monotonic() - self._start
             if elapsed > MAX_DOWNLOAD_SECONDS:

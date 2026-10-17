@@ -21,6 +21,7 @@ from parley.install import InstallError
 from parley.update import UpdateError, Updater
 from test_update import FakeServer, make_release, sha
 
+CRLF = bytes([13, 10])
 OK = b"import sys\nsys.exit(0)\n"
 CRASH = b"import sys\nsys.exit(1)\n"
 
@@ -244,6 +245,41 @@ class DeadlineTests(Base):
             with self.assertRaises(UpdateError):
                 u.download_blob(idx[0], self.tmp / "b.part")
         self.assertEqual(u.download_blob(idx[0], self.tmp / "c.bin").read_bytes(), tree()[idx[0].path])
+
+
+class TrickleTests(unittest.TestCase):
+    def test_trickling_server_hits_deadline_quickly(self):
+        import socket
+        import threading
+        import time
+        ls = socket.socket()
+        ls.bind(("127.0.0.1", 0))
+        ls.listen(1)
+        stop = threading.Event()
+
+        def serve():
+            c, _ = ls.accept()
+            c.recv(4096)
+            c.sendall(b"HTTP/1.1 200 OK" + CRLF + b"Content-Length: 100000" + CRLF + CRLF)
+            try:
+                while not stop.is_set():
+                    c.sendall(b"x")
+                    time.sleep(0.05)
+            except OSError:
+                pass
+            c.close()
+        threading.Thread(target=serve, daemon=True).start()
+        self.addCleanup(ls.close)
+        self.addCleanup(stop.set)
+        u = Updater(f"http://127.0.0.1:{ls.getsockname()[1]}/parley/version.json", "0.1.0",
+                    _allow_http_localhost=True)
+        with tempfile.TemporaryDirectory(prefix="parley_test_install_") as d:
+            f = update.IndexFile("a.bin", "0" * 64, 100000)
+            t0 = time.monotonic()
+            with mock.patch.object(update, "MAX_DOWNLOAD_SECONDS", 1.0):
+                with self.assertRaises(UpdateError):
+                    u.download_blob(f, Path(d) / "a.bin")
+            self.assertLess(time.monotonic() - t0, 4.0)
 
 
 class LauncherTests(Base):

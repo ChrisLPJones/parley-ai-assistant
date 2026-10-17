@@ -20,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -68,11 +69,26 @@ def harden_dir(path: Path) -> None:
         raise InstallError("cannot tell which user to restrict the install folder to")
     domain = os.environ.get("USERDOMAIN")
     who = f"{domain}\\{user}" if domain else user
-    r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{who}:(OI)(CI)F",
-                        "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"],
-                       capture_output=True, text=True, timeout=30)
+    try:
+        r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{who}:(OI)(CI)F",
+                            "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:  # includes TimeoutExpired
+        raise InstallError("could not restrict the install folder to this user") from e
     if r.returncode != 0:
         raise InstallError("could not restrict the install folder to this user")
+
+
+def _replace_dir(src: Path, dst: Path, tries: int = 5, delay: float = 0.2) -> None:
+    """os.replace with a short retry: antivirus scanners briefly hold handles on freshly written trees. Fails closed."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay)
 
 
 def run_self_check(appdir: Path) -> bool:
@@ -174,7 +190,7 @@ def install_version(root: Path, updater: Updater, manifest: Manifest, files: lis
         if not self_check(partial):
             raise InstallError("the new version failed its self-check")
         _verify(partial, entries)  # the self-check ran code from the tree; make sure it is still exactly the index
-        os.replace(partial, final)
+        _replace_dir(partial, final)
         try:
             ptr = Pointer(version, cur.version if cur else None, "pending", 0,
                           cur.skip if cur else [], cur.declined if cur else [], hashlib.sha256(index).hexdigest())
