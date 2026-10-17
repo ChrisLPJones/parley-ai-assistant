@@ -55,7 +55,11 @@ conversation, such as the contents of a file you asked about.
 backend = "anthropic"   # or "openai"
 ```
 
-Then set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment (or `api_key` in the config).
+Then save your key with `parley --set-key anthropic` (or `openai`; the prompt hides what you type): it goes into the
+Windows credential store, never into a file. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment work too, a saved
+key wins. `parley --key-status` shows what is saved and which source is used; `parley --delete-key anthropic` removes it.
+A plaintext `api_key` in an older `config.toml` is moved into the store at startup and removed from the file (rotate the
+key if that file was ever synced or shared).
 Defaults are `claude-opus-5-5` (at low effort for quick replies) and OpenAI's `chat-latest`;
 change either with `model`. Any other GGUF works locally via `model_repo` + `model_file`, and
 `backend = "ollama"` / `"server"` uses a local server you already run.

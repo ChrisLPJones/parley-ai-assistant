@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .credstore import check_key_shape
 from .llama_server import PRESETS, RUNTIMES, check_model_names
 
 # How a saved change takes effect.
@@ -45,6 +46,7 @@ class Setting:
     apply: str
     choices: tuple = ()
     range: tuple | None = None  # (min, max) inclusive, for int / float
+    zero_ok: bool = False  # int: 0 is also accepted although it is outside range (it means "off" / "server's own")
     advanced: bool = False
 
     def validate(self, value):
@@ -67,8 +69,9 @@ def _number(s, v, kind):
         if not math.isfinite(v):
             raise ValueError(f"{s.label}: must be a number")
     lo, hi = s.range
-    if not lo <= v <= hi:
-        raise ValueError(f"{s.label}: must be between {lo} and {hi}")
+    if not (lo <= v <= hi or (s.zero_ok and v == 0)):
+        zero = " (or 0)" if s.zero_ok else ""
+        raise ValueError(f"{s.label}: must be between {lo} and {hi}{zero}")
     return v
 
 
@@ -103,8 +106,10 @@ def _hotkey(s, v):
 
 
 def _device(s, v):
-    """audio.*_device: None = system default; a name (substring) or a device index."""
-    if v is None or (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10_000):
+    """audio.*_device: None or "" = system default (stored as None); a name (substring) or a device index."""
+    if v is None or v == "":
+        return None
+    if (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10_000):
         return v
     if isinstance(v, str) and v.strip() and len(v) <= 200 and v.isprintable():
         return v
@@ -224,15 +229,16 @@ SETTINGS: tuple[Setting, ...] = (
     _s("llm.runtime", "choice", "Built-in runtime", "Where the built-in model runs.", RELOAD_LLM, choices=RUNTIMES, advanced=True),
     _s("llm.gpu_layers", "int", "GPU layers", "-1 fits automatically to free memory.", RELOAD_LLM, range=(-1, 999), advanced=True),
     _s("llm.model", "str", "Model name", "Cloud or server model name; empty uses the default.", REBUILD_CHAT, advanced=True),
-    _s("llm.api_key", "str", "API key", "Stored in the Windows credential store, not here.", REBUILD_CHAT, advanced=True),
+    _s("llm.api_key", "str", "API key", "Saved in the Windows credential store, not in config.toml (a key found there is moved at startup). "
+       "Without one, ANTHROPIC_API_KEY / OPENAI_API_KEY is used.", REBUILD_CHAT, advanced=True),
     _s("llm.effort", "choice", "Claude effort", "Low answers fastest.", LIVE, choices=EFFORTS, advanced=True),
     _s("llm.base_url", "url", "Server address", "Override the endpoint for OpenAI, Ollama or another server.", REBUILD_CHAT,
        advanced=True),
     _s("llm.system_prompt", "text", "System prompt", "Instructions given to the model before every conversation.", LIVE,
        range=(0, 4000), advanced=True),
     _s("llm.temperature", "float", "Temperature", "Higher is more varied.", LIVE, range=(0, 2), advanced=True),
-    _s("llm.num_ctx", "int", "Context size", "Context window in tokens; for Ollama 0 keeps the server's.", RELOAD_LLM,
-       range=(0, 131072), advanced=True),
+    _s("llm.num_ctx", "int", "Context size", "Context window in tokens (512 to 131072); for Ollama 0 keeps the server's.", RELOAD_LLM,
+       range=(512, 131072), zero_ok=True, advanced=True),
     _s("llm.keep_alive", "str", "Keep loaded (Ollama)", "How long Ollama keeps the model loaded, such as 30m.", LIVE, advanced=True),
     _s("llm.think", "bool", "Let it think", "Reasoning models think first (much slower to start talking).", RELOAD_LLM, advanced=True),
     _s("llm.history_turns", "int", "Remembered exchanges", "Question and answer pairs kept in the conversation.", LIVE,
@@ -268,8 +274,10 @@ _STR_CHECKS = {
 
 
 def _api_key(s, v):
-    # The key itself is never echoed in an error message.
-    if not isinstance(v, str) or len(v) > 500 or re.search(r"\s", v):
+    # Printable ASCII, no spaces, at most 512 characters; "" clears it. The key itself is never echoed in an error.
+    if v == "":
+        return v
+    if not check_key_shape(v):
         raise ValueError(f"{s.label}: not a valid key")
     return v
 

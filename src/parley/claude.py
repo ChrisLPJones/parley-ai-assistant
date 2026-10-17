@@ -6,6 +6,7 @@ from typing import Callable, Iterator
 
 import anthropic
 
+from . import credstore
 from .config import LlmConfig
 from .tools import Toolbox
 
@@ -23,9 +24,11 @@ class ClaudeProvider:
     def __init__(self, cfg: LlmConfig, tb: Toolbox | None, web: bool):
         self.cfg, self.toolbox = cfg, tb
         self.model = cfg.model or DEFAULT_MODEL
-        key = cfg.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        key = credstore.resolve_api_key("anthropic", cfg)
         if not key:
-            raise SystemExit('backend = "anthropic" needs an API key: set ANTHROPIC_API_KEY or llm.api_key')
+            raise SystemExit('backend = "anthropic" needs an API key: run "parley --set-key anthropic" or set ANTHROPIC_API_KEY')
+        if os.environ.get("ANTHROPIC_BASE_URL"):  # the SDK honours it, so the key would go there
+            credstore.warn_if_custom_endpoint("anthropic", os.environ["ANTHROPIC_BASE_URL"])
         self.client = anthropic.Anthropic(api_key=key)
         self.tools = (tb.anthropic() if tb else []) + (WEB_TOOLS if web else [])
 
@@ -37,7 +40,7 @@ class ClaudeProvider:
         try:
             self.client.models.retrieve(self.model)
         except anthropic.AuthenticationError as e:
-            raise SystemExit("Anthropic rejected the API key (check ANTHROPIC_API_KEY or llm.api_key)") from e
+            raise SystemExit("Anthropic rejected the API key (replace it with 'parley --set-key anthropic')") from e
         except anthropic.NotFoundError as e:
             raise SystemExit(f"Claude model {self.model!r} not found. Set llm.model in config.toml.") from e
 

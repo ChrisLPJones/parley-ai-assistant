@@ -56,8 +56,8 @@ class SttConfig:
 @dataclass
 class LlmConfig:
     # builtin:   Parley downloads and runs a small local model itself (default, works offline)
-    # anthropic: Claude via the Anthropic API (needs ANTHROPIC_API_KEY or api_key)
-    # openai:    OpenAI API (needs OPENAI_API_KEY or api_key)
+    # anthropic: Claude via the Anthropic API (needs a saved key, see `parley --set-key`, or ANTHROPIC_API_KEY)
+    # openai:    OpenAI API (needs a saved key, see `parley --set-key`, or OPENAI_API_KEY)
     # ollama / server: a local server you already run (Ollama / any OpenAI-compatible server)
     backend: str = "builtin"
     preset: str = "auto"  # builtin: auto (picked from your hardware) | small (Qwen3.5 4B) | tiny (Qwen3.5 2B)
@@ -69,7 +69,7 @@ class LlmConfig:
     runtime: str = "auto"
     gpu_layers: int = -1  # builtin: layers on the GPU; -1 = fit automatically to free memory
     model: str = ""  # anthropic: default claude-opus-5-5; openai: default chat-latest; ollama/server: "" = first available
-    api_key: str = field(default="", repr=False)  # anthropic/openai; leave empty to use the ANTHROPIC_API_KEY / OPENAI_API_KEY env var
+    api_key: str = field(default="", repr=False)  # legacy: moved into the credential store at startup (credstore.py); server backend only: key for your own server
     effort: str = "low"  # anthropic: low | medium | high; low answers fastest
     base_url: str = ""  # openai/ollama/server: override the endpoint
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
