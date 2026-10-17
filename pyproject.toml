@@ -1,0 +1,34 @@
+[project]
+name = "parley"
+version = "0.1.0"
+description = "Push-to-talk voice assistant that runs entirely on your own machine: local speech-to-text, local LLM, local text-to-speech."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "faster-whisper>=1.1",
+    "kokoro-onnx>=0.4.7",
+    "sounddevice>=0.5",
+    "numpy>=1.26",
+    "httpx>=0.27",
+    "pynput>=1.7",
+    # cuBLAS / cuDNN DLLs for faster-whisper on NVIDIA GPUs, so users don't need the CUDA toolkit
+    "nvidia-cublas-cu12; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32' or sys_platform == 'linux'",
+    # GPU build of ONNX Runtime for Kokoro (it also runs on CPU when there's no NVIDIA GPU)
+    "onnxruntime-gpu>=1.20; sys_platform == 'win32' or sys_platform == 'linux'",
+]
+
+[tool.uv]
+# kokoro-onnx depends on the CPU-only onnxruntime, which would clash with onnxruntime-gpu
+override-dependencies = ["onnxruntime; sys_platform == 'darwin'"]
+
+[project.scripts]
+parley = "parley.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/parley"]

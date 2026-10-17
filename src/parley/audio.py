@@ -1,0 +1,97 @@
+"""Microphone capture with pre-roll, and an interruptible speaker queue."""
+import collections
+import logging
+import queue
+import threading
+from typing import Callable
+
+import numpy as np
+import sounddevice as sd
+
+log = logging.getLogger(__name__)
+
+MIC_RATE = 16000  # what Whisper expects
+SPEAKER_RATE = 24000  # what Kokoro produces
+
+
+def _device(spec, kind: str):
+    if spec is None or isinstance(spec, int):
+        return spec
+    for i, dev in enumerate(sd.query_devices()):
+        if spec.lower() in dev["name"].lower() and dev[f"max_{kind}_channels"] > 0:
+            return i
+    log.warning("No %s device matching %r, using default", kind, spec)
+    return None
+
+
+class Recorder:
+    """Keeps the mic stream open so recording starts instantly, holding a short pre-roll."""
+
+    def __init__(self, device=None, preroll_ms: int = 300):
+        self._lock = threading.Lock()
+        self._preroll = collections.deque(maxlen=max(1, preroll_ms * MIC_RATE // 1000 // 512))
+        self._chunks: list[np.ndarray] | None = None
+        self._stream = sd.InputStream(
+            samplerate=MIC_RATE, channels=1, dtype="float32", blocksize=512,
+            device=_device(device, "input"), callback=self._callback,
+        )
+        self._stream.start()
+
+    def _callback(self, data, frames, time_info, status):
+        block = data[:, 0].copy()
+        with self._lock:
+            if self._chunks is not None:
+                self._chunks.append(block)
+            else:
+                self._preroll.append(block)
+
+    @property
+    def recording(self) -> bool:
+        return self._chunks is not None
+
+    def start(self) -> None:
+        with self._lock:
+            self._chunks = list(self._preroll)
+
+    def stop(self) -> np.ndarray:
+        with self._lock:
+            chunks, self._chunks = self._chunks or [], None
+            self._preroll.clear()
+        return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+
+
+def tone(freq: float, ms: int = 60, volume: float = 0.15) -> np.ndarray:
+    t = np.arange(int(SPEAKER_RATE * ms / 1000)) / SPEAKER_RATE
+    fade = np.minimum(1, np.minimum(t, t[::-1]) * 400)  # ~2.5ms fade in/out, no clicks
+    return (np.sin(2 * np.pi * freq * t) * fade * volume).astype(np.float32)
+
+
+class Player:
+    """Plays queued clips back to back. Clips tagged with a stale turn id are dropped,
+    and the clip playing is cut off within ~50ms when its turn becomes stale."""
+
+    BLOCK = SPEAKER_RATE // 20
+
+    def __init__(self, device=None, is_current: Callable[[int], bool] = lambda turn: True):
+        self._queue: queue.Queue[tuple[int, np.ndarray, Callable | None]] = queue.Queue()
+        self._is_current = is_current
+        self._stream = sd.OutputStream(
+            samplerate=SPEAKER_RATE, channels=1, dtype="float32", device=_device(device, "output"),
+        )
+        self._stream.start()
+        threading.Thread(target=self._run, daemon=True, name="player").start()
+
+    def play(self, turn: int, samples: np.ndarray, on_start: Callable | None = None) -> None:
+        self._queue.put((turn, samples, on_start))
+
+    def _run(self) -> None:
+        while True:
+            turn, samples, on_start = self._queue.get()
+            if not self._is_current(turn):
+                continue
+            if on_start:
+                on_start()
+            for i in range(0, len(samples), self.BLOCK):
+                if not self._is_current(turn):
+                    break
+                self._stream.write(samples[i:i + self.BLOCK])

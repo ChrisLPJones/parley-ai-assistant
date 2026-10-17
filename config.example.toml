@@ -1,0 +1,37 @@
+# Parley settings. Copy to %APPDATA%\parley\config.toml. Every key is optional.
+
+[hotkey]
+# Hold to talk. pynput key names: pause, f13, scroll_lock, ctrl_r, insert, or a single character
+key = "pause"
+
+[audio]
+# input_device = "Microphone"   # name substring or index from `parley --list-devices`
+# output_device = "Speakers"
+preroll_ms = 300
+sounds = true
+
+[stt]
+model = "large-v3-turbo"   # tiny / base / small / medium / large-v3 / large-v3-turbo / distil-large-v3
+device = "auto"            # auto | cuda | cpu
+compute_type = "default"
+language = "en"            # "" to auto-detect
+beam_size = 1
+
+[llm]
+api = "ollama"                       # ollama | openai
+base_url = "http://127.0.0.1:11434"  # for openai-style servers include /v1, e.g. http://127.0.0.1:8080/v1
+model = ""                           # "" = first installed model
+temperature = 0.7
+num_ctx = 8192                       # 0 = keep the server's setting (avoids reloading a shared model)
+keep_alive = "30m"
+think = false
+history_turns = 10
+reset_after_idle_s = 300
+# system_prompt = "You are Parley, ..."
+
+[tts]
+voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
+speed = 1.1
+lang = "en-us"
+device = "auto"     # auto | cpu
+# model_dir = "D:/models/kokoro"
