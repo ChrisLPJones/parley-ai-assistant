@@ -1,0 +1,68 @@
+# Tests and dependency audit. Runs on pull requests to main and on pushes to main.
+#
+# - Read-only token, no secrets, only the three first-party actions below, each pinned to a full commit SHA
+#   (the comment names the release it is). Bump them deliberately: look up the tag's commit with
+#   `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha` and check the release notes first.
+# - Tests that need things the runner may not have (Inno Setup, an NVIDIA GPU, models, a microphone) skip with a reason.
+#   The suite runs against a throwaway PARLEY_HOME and never downloads models or llama.cpp.
+# - The `audit` job FAILS when pip-audit finds a known vulnerability in the locked runtime dependencies. To accept a
+#   specific advisory, add `--ignore-vuln <ID>` (e.g. `--ignore-vuln GHSA-xxxx-xxxx-xxxx`) to the pip-audit command
+#   below with a comment saying why it is accepted and when to revisit it; never turn the job off.
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.16"
+          enable-cache: false
+      - name: Install locked dependencies
+        run: uv sync --frozen
+      - name: Unit tests
+        env:
+          PARLEY_HOME: ${{ runner.temp }}\parley_test_ci
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:PARLEY_HOME | Out-Null
+          Write-Host "PARLEY_HOME=$env:PARLEY_HOME"
+          uv run python -m unittest discover -s tests -v
+
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.16"
+          enable-cache: false
+      - name: Export locked runtime dependencies
+        run: uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements-audit.txt
+      - name: pip-audit (fails on any known vulnerability)
+        run: uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip

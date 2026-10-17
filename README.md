@@ -83,7 +83,9 @@ uv run parley
 
 The first run downloads everything Parley needs (speech, language and voice models and the
 llama.cpp runtime). This is several GB and progress is shown. Later starts take a few seconds and
-work offline (except cloud backends and web search).
+work offline (except cloud backends and web search). The llama.cpp runtime is checked against a built-in size and
+SHA-256 for the pinned release before it is unpacked; a mismatch is discarded and Parley says so (the speech and language
+models from Hugging Face are not checksum-pinned).
 
 ```sh
 uv run parley --ask "what's the capital of Peru?"   # typed question through the whole pipeline, no mic
@@ -144,7 +146,7 @@ Expect problems:
 
 - The global hotkey needs an X11 session; under Wayland it will likely fail.
 - `pywin32` is a Windows-only dependency, and the Windows-only features (Explorer "this folder" and selection, GPU detection) are unavailable.
-- Known open issues: the pip-installed CUDA libraries may not be found, because Parley extends `PATH` but not `LD_LIBRARY_PATH`; the pynput win32 filter is unverified on Linux; the Linux llama.cpp release asset names are unverified.
+- Known open issues: the pip-installed CUDA libraries may not be found, because Parley extends `PATH` but not `LD_LIBRARY_PATH`; the pynput win32 filter is unverified on Linux; the Linux llama.cpp assets were checked against the release listing and hashed (Ubuntu Vulkan x64) but never run.
 
 ## Components
 

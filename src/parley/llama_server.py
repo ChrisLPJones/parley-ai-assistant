@@ -3,24 +3,59 @@ as a child process that dies with Parley."""
 import atexit
 import logging
 import platform
+import shutil
 import socket
 import subprocess
 import sys
-import tarfile
 import time
-import zipfile
 from pathlib import Path
 
 import httpx
 
-from . import gpu
+from . import cuda_pack, gpu
 from .config import LlmConfig
-from .download import download
+from .download import ArchiveError, DownloadError, download, download_verified, safe_extract_tar, safe_extract_zip
 
 log = logging.getLogger(__name__)
 
 LLAMA_CPP_TAG = "b11702"
 RELEASE_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_TAG}/"
+RELEASE_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"})
+
+# sha256 and size of every release asset `_build_assets` can ask for, from the GitHub release API (`digest`) for
+# LLAMA_CPP_TAG; the Windows vulkan-x64 and cuda-13.4-x64 zips, the macOS arm64 and the Ubuntu vulkan-x64 tarballs were
+# also downloaded and hashed. Bumping the tag means regenerating this table (tests/test_llama_pins.py checks it is
+# complete). An asset that is not listed is never downloaded. The Hugging Face model files are not pinned.
+ASSET_PINS: dict[str, tuple[str, int]] = {
+    "cudart-llama-b11702-bin-ubuntu-cuda-12.8-x64.tar.gz":
+        ("ea7a556a461317708b06e90c436dbf305db93d10939715d6b58aec423df1ad41", 594377730),
+    "cudart-llama-b11702-bin-ubuntu-cuda-13.4-x64.tar.gz":
+        ("0bc852fd02cce084b983ba78f0ab9d4c7c8a84261b2146909cfec56de526df59", 440236659),
+    "cudart-llama-bin-win-cuda-12.4-x64.zip":
+        ("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6", 391443627),
+    "cudart-llama-bin-win-cuda-13.4-x64.zip":
+        ("738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668", 423535356),
+    "llama-b11702-bin-macos-arm64.tar.gz":
+        ("96d5a4dee4c5e5039eb374aa2465d6942f2c341ca13198c9fb01419b671e1468", 12249372),
+    "llama-b11702-bin-macos-x64.tar.gz":
+        ("d7fa1b16b3030a3175e12688e2afd88522486f22b25c73465cc808c73185dc2e", 11736034),
+    "llama-b11702-bin-ubuntu-cuda-12.8-x64.tar.gz":
+        ("78c82f137b92cfc2e77309e7a947afa281b7898fed90c160bc53e08ee7c5c2e4", 172730349),
+    "llama-b11702-bin-ubuntu-cuda-13.4-x64.tar.gz":
+        ("e89577e8da32ab51c6e75c835eb286cc77f201644d20e3eaa1897516a43e5351", 153839224),
+    "llama-b11702-bin-ubuntu-vulkan-arm64.tar.gz":
+        ("6a49d48537912db13a48b91d30fe58ee8c02a6cbb0d4025897d0bda535106751", 24250253),
+    "llama-b11702-bin-ubuntu-vulkan-x64.tar.gz":
+        ("62cdc0ec1b475e4263848168c183a0b1fa7dcb5797668a62be3de22691601233", 30556972),
+    "llama-b11702-bin-win-cuda-12.4-x64.zip":
+        ("3470f420c53330830ed08b6a0bb79db7199a185c4b6e7a3db0cf865043cb263c", 266833945),
+    "llama-b11702-bin-win-cuda-13.4-x64.zip":
+        ("39839af853b951bd1454acc458ef7b03d4c8acd6c9da61fa1c29083f011054ea", 154749299),
+    "llama-b11702-bin-win-vulkan-arm64.zip":
+        ("c9d053cb8517f7ef2b7e553b0a658fcdf637d7647729c9612abb1facc81a3aa7", 24878164),
+    "llama-b11702-bin-win-vulkan-x64.zip":
+        ("cb34fdf7c628b45adc50954097fba0263a92a9a5413faba1074e790ed8781e14", 32260463),
+}
 
 # name: (Hugging Face repo, file, approx memory needed in GB incl. context). Kept small so Parley
 # runs on ordinary laptops; bigger GGUFs work via llm.model_repo / model_file.
@@ -72,23 +107,44 @@ def _build_assets(runtime: str) -> tuple[str, list[str]]:
     return "vulkan", [f"llama-{LLAMA_CPP_TAG}-bin-ubuntu-vulkan-{arch}.tar.gz"]
 
 
-def ensure_runtime(home: Path, runtime: str) -> Path:
-    """Download and unpack llama.cpp once; returns the llama-server executable."""
+class RuntimeDownloadError(RuntimeError):
+    """The llama.cpp download is not trusted or not usable; the message is short enough to be spoken."""
+
+
+def _fetch_asset(asset: str, home: Path, open_stream=None) -> Path:
+    """Download one pinned release asset (fresh, size and sha256 checked, deleted on mismatch). Unknown assets are refused."""
+    pin = ASSET_PINS.get(asset)
+    if pin is None:
+        raise RuntimeDownloadError("Parley has no verified copy of the language model runtime for this computer, so it will not download one.")
+    dest = home / "downloads" / asset
+    dest.unlink(missing_ok=True)  # never trust a leftover file; a verified fetch always starts fresh
+    try:
+        return download_verified(open_stream or cuda_pack.make_opener(RELEASE_HOSTS), RELEASE_URL + asset, dest, *pin)
+    except (DownloadError, cuda_pack.PackError) as e:
+        raise RuntimeDownloadError(f"The language model runtime download failed its safety check ({e}), so Parley discarded it.") from e
+
+
+def ensure_runtime(home: Path, runtime: str, open_stream=None) -> Path:
+    """Download (pinned and verified) and unpack llama.cpp once; returns the llama-server executable."""
     variant, assets = _build_assets(runtime)
     target = home / "runtime" / f"llama.cpp-{LLAMA_CPP_TAG}-{variant}"
     exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
     if not (target / ".complete").exists():
         log.info("Downloading llama.cpp %s (%s), first run only ...", LLAMA_CPP_TAG, variant)
+        shutil.rmtree(target, ignore_errors=True)  # a half-extracted earlier attempt
         target.mkdir(parents=True, exist_ok=True)
         for asset in assets:
-            archive = download(RELEASE_URL + asset, home / "downloads" / asset)
-            if asset.endswith(".zip"):
-                with zipfile.ZipFile(archive) as z:
-                    z.extractall(target)
-            else:
-                with tarfile.open(archive) as t:
-                    t.extractall(target, filter="data")
-            archive.unlink()
+            archive = _fetch_asset(asset, home, open_stream)
+            try:
+                if asset.endswith(".zip"):
+                    safe_extract_zip(archive, target)
+                else:
+                    safe_extract_tar(archive, target)
+            except ArchiveError as e:
+                shutil.rmtree(target, ignore_errors=True)
+                raise RuntimeDownloadError(f"The language model runtime archive looked unsafe ({e}), so Parley did not unpack it.") from e
+            finally:
+                archive.unlink(missing_ok=True)
         (target / ".complete").touch()
     exe = next(target.rglob(exe_name), None)
     if not exe:
