@@ -96,6 +96,7 @@ uv run parley --ask "what's the capital of Peru?"   # typed question through the
 uv run parley --test-mic                            # microphone check
 uv run parley --list-devices                        # list mics/speakers for the config
 uv run parley -v                                    # debug logging with latency timings
+uv run parley --tray                                # Windows: run from the notification area (log: <home>\logs\parley.log)
 ```
 
 ## Build

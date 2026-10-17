@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 STATE_FILE = "update_state.json"
 NOTICE_FILE = "rollback_notified.json"
 LAUNCHER_EXE = "Parley.exe"
+RESTARTED_FLAG = "--restarted"
 MAX_PROMPT_NOTES = 1500
 _MB_YESNO, _MB_ICONQUESTION, _MB_SETFOREGROUND, _MB_TOPMOST, _IDYES = 0x4, 0x20, 0x10000, 0x40000, 6
 
@@ -118,7 +119,8 @@ class UpdateFlow:
 
     def restart(self) -> None:
         """Start the launcher (which runs the new version). Called after the app has shut down its loop."""
-        self.launch(self.root, sys.argv[1:])
+        args = [a for a in sys.argv[1:] if a != RESTARTED_FLAG]
+        self.launch(self.root, [*args, RESTARTED_FLAG])  # the new process waits for this one's instance lock
 
     def wait_idle(self) -> bool:
         """Block until Parley is not busy. False if the flow was stopped first."""
@@ -169,12 +171,28 @@ class UpdateFlow:
         except Exception:
             log.exception("Update flow failed")
 
-    def _check_and_install(self) -> None:
+    def check_now(self, notify: Callable[[str], None]) -> None:
+        """Manual check (tray menu), meant for a worker thread: same flow as the launch check, but says the result."""
+        if self.updater is None:
+            notify("Update checks are turned off.")
+            return
+        try:
+            self._check_and_install(notify)
+        except UPDATE_ERRORS as e:
+            log.info("Manual update check failed: %s", e)
+            notify("Could not check for updates.")
+        except Exception:
+            log.exception("Update flow failed")
+            notify("Could not check for updates.")
+
+    def _check_and_install(self, notify: Callable[[str], None] | None = None) -> None:
         u = self.updater
         if u is None or not self.wait_idle():
             return
         m = u.check()  # quiet None when offline, invalid or not newer
         if m is None or install.is_skipped(self.root, m.version):
+            if notify:
+                notify(f"Parley {self.version} is up to date.")
             return
         if not self.wait_idle():  # recheck right before prompting
             return

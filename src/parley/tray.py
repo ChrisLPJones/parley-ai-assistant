@@ -22,6 +22,7 @@ from . import tray_icons
 log = logging.getLogger(__name__)
 
 WINDOW_CLASS = "ParleyTrayWindow"
+OPEN_SETTINGS_MESSAGE = "ParleyOpenSettings"  # registered window message; carries no data
 
 try:  # pywin32 is a Windows-only dependency
     import pywintypes
@@ -101,6 +102,21 @@ if AVAILABLE:
     _ICON_ID = 1
     _ICON_FLAGS = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
 
+    # Private DLL instances: setting argtypes/restype on the shared ctypes.windll objects would change them for
+    # every other module in the process.
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    _user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
+    _user32.SetTimer.restype = ctypes.c_size_t
+    _user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    _user32.KillTimer.restype = ctypes.c_int
+    _user32.CreateIconIndirect.argtypes = [ctypes.c_void_p]
+    _user32.CreateIconIndirect.restype = ctypes.c_void_p
+    _gdi32.CreateBitmap.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_char_p]
+    _gdi32.CreateBitmap.restype = ctypes.c_void_p
+    _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    _gdi32.DeleteObject.restype = ctypes.c_int
+
     class _ICONINFO(ctypes.Structure):
         _fields_ = [("fIcon", ctypes.c_int), ("xHotspot", ctypes.c_uint32), ("yHotspot", ctypes.c_uint32),
                     ("hbmMask", ctypes.c_void_p), ("hbmColor", ctypes.c_void_p)]
@@ -118,10 +134,7 @@ if AVAILABLE:
         bgra[..., 0], bgra[..., 1], bgra[..., 2], bgra[..., 3] = (
             rgba[..., 2], rgba[..., 1], rgba[..., 0], rgba[..., 3])
         # ctypes: win32gui.CreateBitmap only accepts None for the pixel data
-        gdi, user = ctypes.windll.gdi32, ctypes.windll.user32
-        gdi.CreateBitmap.restype = ctypes.c_void_p
-        gdi.DeleteObject.argtypes = [ctypes.c_void_p]
-        user.CreateIconIndirect.restype = ctypes.c_void_p
+        gdi, user = _gdi32, _user32
         color = gdi.CreateBitmap(w, h, 1, 32, bgra.tobytes())
         mask = gdi.CreateBitmap(w, h, 1, 1, bytes(((w + 15) // 16 * 2) * h))
         try:
@@ -140,8 +153,10 @@ if AVAILABLE:
 
     class Tray:
         def __init__(self, on_menu_command: Callable[[str], None] | None = None, *,
-                     on_activate: Callable[[], None] | None = None, tooltip: str = "Parley") -> None:
+                     on_activate: Callable[[], None] | None = None, tooltip: str = "Parley",
+                     on_open_settings: Callable[[], None] | None = None) -> None:
             self.on_menu_command = on_menu_command
+            self.on_open_settings = on_open_settings  # a second launch asked for it
             self.on_activate = on_activate  # left click on the icon
             self.visible = False  # the icon is currently in the notification area
             self._state = "starting"
@@ -157,6 +172,7 @@ if AVAILABLE:
             self._icons: dict[tuple[str, int], int] = {}
             self._frame = 0
             self._taskbar_created = 0
+            self._open_settings_msg = 0
             self._class_atom = None
             self._hinst = None
 
@@ -230,6 +246,7 @@ if AVAILABLE:
             self._thread_id = win32api.GetCurrentThreadId()
             self._hinst = win32api.GetModuleHandle(None)
             self._taskbar_created = win32gui.RegisterWindowMessage("TaskbarCreated")
+            self._open_settings_msg = win32gui.RegisterWindowMessage(OPEN_SETTINGS_MESSAGE)
             wc = win32gui.WNDCLASS()
             wc.hInstance = self._hinst
             wc.lpszClassName = WINDOW_CLASS
@@ -240,8 +257,9 @@ if AVAILABLE:
                 win32con.WM_TIMER: self._on_timer,
                 win32con.WM_CLOSE: self._on_close,
                 win32con.WM_QUERYENDSESSION: lambda *a: 1,
-                win32con.WM_ENDSESSION: self._on_close,
+                win32con.WM_ENDSESSION: self._on_endsession,
                 self._taskbar_created: self._on_taskbar_created,
+                self._open_settings_msg: self._on_open_settings,
             }
             try:
                 self._class_atom = win32gui.RegisterClass(wc)
@@ -264,7 +282,7 @@ if AVAILABLE:
         def _cleanup(self) -> None:
             try:
                 if self._hwnd:
-                    ctypes.windll.user32.KillTimer(ctypes.c_void_p(self._hwnd), _TIMER_ID)
+                    _user32.KillTimer(self._hwnd, _TIMER_ID)
             except Exception:
                 pass
             if self.visible:
@@ -314,13 +332,13 @@ if AVAILABLE:
 
         def _restart_timer(self) -> None:
             try:
-                ctypes.windll.user32.KillTimer(ctypes.c_void_p(self._hwnd), _TIMER_ID)
+                _user32.KillTimer(self._hwnd, _TIMER_ID)
             except Exception:
                 pass
             spec = tray_icons.STATES[self._state]
             if len(spec.frames) > 1:
                 # ctypes: pywin32 has no SetTimer; WM_TIMER arrives in the window procedure
-                ctypes.windll.user32.SetTimer(ctypes.c_void_p(self._hwnd), _TIMER_ID, int(1000 / spec.fps), None)
+                _user32.SetTimer(self._hwnd, _TIMER_ID, int(1000 / spec.fps), None)
 
         def _apply_state(self, state: str) -> None:
             if state != self._state:
@@ -363,8 +381,21 @@ if AVAILABLE:
             self._add_icon()
             return 0
 
+        def _on_open_settings(self, hwnd, msg, wparam, lparam):
+            if self.on_open_settings:
+                try:
+                    self.on_open_settings()
+                except Exception:
+                    log.exception("Open-settings request failed")
+            return 0
+
         def _on_close(self, hwnd, msg, wparam, lparam):
             self._stop.set()
+            return 0
+
+        def _on_endsession(self, hwnd, msg, wparam, lparam):
+            if wparam:  # TRUE = the session really ends; FALSE = it was cancelled after WM_QUERYENDSESSION
+                self._stop.set()
             return 0
 
         def _on_destroy(self, hwnd, msg, wparam, lparam):
@@ -372,7 +403,7 @@ if AVAILABLE:
 
         def _on_tray(self, hwnd, msg, wparam, lparam):
             try:
-                if lparam in (win32con.WM_LBUTTONUP, win32con.WM_LBUTTONDBLCLK):
+                if lparam == win32con.WM_LBUTTONUP:  # not DBLCLK: a double click already sent an UP
                     if self.on_activate:
                         self.on_activate()
                 elif lparam in (win32con.WM_RBUTTONUP, win32con.WM_CONTEXTMENU):
@@ -404,6 +435,17 @@ if AVAILABLE:
             if cmd:
                 dispatch_command(self._model, cmd, self.on_menu_command)
 
+    def post_open_settings() -> bool:
+        """Ask the running instance (found by its window class) to open Settings. False if there is none yet."""
+        try:
+            hwnd = win32gui.FindWindow(WINDOW_CLASS, None)
+            if not hwnd:
+                return False
+            win32gui.PostMessage(hwnd, win32gui.RegisterWindowMessage(OPEN_SETTINGS_MESSAGE), 0, 0)
+            return True
+        except Exception:
+            return False
+
     def has_notification_area() -> bool:
         """True when an Explorer taskbar with a notification area exists in this session."""
         try:
@@ -416,7 +458,8 @@ else:
     class Tray:  # type: ignore[no-redef]
         """Stub for platforms without pywin32: same API, does nothing."""
 
-        def __init__(self, on_menu_command=None, *, on_activate=None, tooltip: str = "Parley") -> None:
+        def __init__(self, on_menu_command=None, *, on_activate=None, tooltip: str = "Parley",
+                     on_open_settings=None) -> None:
             self.visible = False
             self._stop = threading.Event()
 
@@ -437,6 +480,9 @@ else:
 
     def make_hicon(rgba) -> int:
         raise NotImplementedError
+
+    def post_open_settings() -> bool:
+        return False
 
     def has_notification_area() -> bool:
         return False

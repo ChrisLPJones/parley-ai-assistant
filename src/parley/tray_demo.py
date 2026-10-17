@@ -50,13 +50,18 @@ def main(argv: list[str] | None = None) -> int:
 
     menu()
     threading.Thread(target=cycle, daemon=True).start()
+    timer = None
     if args.seconds:
-        threading.Timer(args.seconds, tray.stop).start()
+        timer = threading.Timer(args.seconds, tray.stop)
+        timer.daemon = True
+        timer.start()
     try:
         tray.run()
     except KeyboardInterrupt:
         pass
     finally:
+        if timer is not None:
+            timer.cancel()
         stop.set()
         tray.stop()
     return 0

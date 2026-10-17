@@ -21,6 +21,17 @@ MIN_SPEECH_S = 0.3
 SILENT_LEVEL = 0.005  # peak below this means the mic isn't picking anything up
 
 
+def activity_of(recording: bool, jobs_busy: bool, sentences_busy: bool, playing: bool) -> str:
+    """Pure: what Parley is doing, for the tray icon. listening > speaking > thinking > idle."""
+    if recording:
+        return "listening"
+    if playing:
+        return "speaking"
+    if jobs_busy or sentences_busy:
+        return "thinking"
+    return "idle"
+
+
 class Parley:
     def __init__(self, cfg: Config, use_mic: bool = True):
         self.cfg = cfg
@@ -71,6 +82,13 @@ class Parley:
         The queues' unfinished counts also cover an item a worker has taken but not finished."""
         recording = self.recorder is not None and self.recorder.recording
         return recording or any(q.unfinished_tasks for q in (self._jobs, self._sentences, self.player.queue))
+
+    def activity(self) -> str:
+        """idle | listening | thinking | speaking (cheap, safe to poll from any thread). The tray debounces it, since
+        the 60 ms beeps make the player queue busy for an instant."""
+        return activity_of(self.recorder is not None and self.recorder.recording,
+                           bool(self._jobs.unfinished_tasks), bool(self._sentences.unfinished_tasks),
+                           bool(self.player.queue.unfinished_tasks))
 
     def say(self, text: str) -> None:
         """Speak a short notice of our own (e.g. about updates). Dropped if the user starts a question meanwhile."""

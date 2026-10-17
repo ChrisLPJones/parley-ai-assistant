@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 UPDATE_ERRORS = (UpdateError, DownloadError, httpx.HTTPError, OSError)
 SELF_CHECK_TIMEOUT = 30.0
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # a windowed parent must not flash a console per child
 
 
 class InstallError(UpdateError):
@@ -72,7 +73,7 @@ def harden_dir(path: Path) -> None:
     try:
         r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{who}:(OI)(CI)F",
                             "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:  # includes TimeoutExpired
         raise InstallError("could not restrict the install folder to this user") from e
     if r.returncode != 0:
@@ -95,7 +96,7 @@ def run_self_check(appdir: Path) -> bool:
     """Default smoke run: `<appdir>/parley-app.exe --self-check` must exit 0 within 30 s."""
     try:
         r = subprocess.run([str(appdir / launcher.CHILD_EXE), "--self-check"], cwd=appdir, capture_output=True,
-                           timeout=SELF_CHECK_TIMEOUT)
+                           timeout=SELF_CHECK_TIMEOUT, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return False
     return r.returncode == 0

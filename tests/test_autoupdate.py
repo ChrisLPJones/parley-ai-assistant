@@ -203,6 +203,35 @@ class PromptFlowTests(FlowBase):
         self.assertEqual(prompt.calls, [])
 
 
+class RestartAndManualCheckTests(FlowBase):
+    def test_restart_adds_restarted_flag_once(self):
+        flow = self.flow(FakeApp(), Prompt(False))
+        with mock.patch.object(sys, "argv", ["parley", "--tray"]):
+            flow.restart()
+        with mock.patch.object(sys, "argv", ["parley", "--tray", "--restarted"]):
+            flow.restart()
+        self.assertEqual([a for _, a in self.launched], [["--tray", "--restarted"], ["--tray", "--restarted"]])
+
+    def test_manual_check_says_up_to_date(self):
+        make_release(self.srv, "0.1.0", tree())
+        said = []
+        self.flow(FakeApp(), Prompt(False)).check_now(said.append)
+        self.assertEqual(said, ["Parley 0.1.0 is up to date."])
+
+    def test_manual_check_without_updater(self):
+        said = []
+        self.flow(FakeApp(), Prompt(False), updater=None).check_now(said.append)
+        self.assertEqual(said, ["Update checks are turned off."])
+
+    def test_manual_check_still_asks_before_installing(self):
+        self.release("0.2.0", tree(OK + b"#2"))
+        prompt = Prompt(False)
+        said = []
+        self.flow(FakeApp(), prompt).check_now(said.append)
+        self.assertEqual(len(prompt.calls), 1)
+        self.assertEqual(said, [])
+
+
 class ConfirmAndNoticeTests(FlowBase):
     def pending_020(self):
         with self.patch_install():
