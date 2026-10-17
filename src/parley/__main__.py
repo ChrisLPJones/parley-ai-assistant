@@ -23,6 +23,8 @@ def run_hotkey_loop(app, key_name: str) -> None:
     from pynput import keyboard
 
     key = _parse_key(key_name)
+    vk = getattr(getattr(key, "value", key), "vk", None)
+    listener = None
 
     def on_press(k):
         if k == key:
@@ -32,10 +34,36 @@ def run_hotkey_loop(app, key_name: str) -> None:
         if k == key:
             app.end_listening()
 
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+    def win32_filter(msg, data):
+        # Swallow the hotkey so no other app reacts to it. Without this, Pause in a focused
+        # console window freezes that console until another key is pressed.
+        if vk is None or data.vkCode != vk:
+            return True
+        if msg in (0x100, 0x104):  # WM_KEYDOWN, WM_SYSKEYDOWN
+            app.begin_listening()
+        elif msg in (0x101, 0x105):  # WM_KEYUP, WM_SYSKEYUP
+            app.end_listening()
+        listener.suppress_event()
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release, win32_event_filter=win32_filter)
+    with listener:
         logging.info("Ready. Hold [%s] and speak; release to send. Ctrl+C to quit.", key_name)
         while listener.is_alive():
             listener.join(0.5)  # short joins keep Ctrl+C responsive on Windows
+
+
+def _disable_console_quick_edit() -> None:
+    """Clicking in a Windows console normally starts a text selection that freezes the program
+    writing to it; turn that off for Parley's console."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    handle = k32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+    mode = ctypes.c_uint32()
+    if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+        k32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)  # -QUICK_EDIT, +EXTENDED_FLAGS
 
 
 def test_mic(cfg, seconds: int = 4) -> None:
@@ -83,8 +111,18 @@ def main() -> None:
         logging.getLogger("parley").setLevel(logging.DEBUG)  # Parley's own timings, not every library's
     # Libraries like huggingface_hub re-enable httpx request logging, so filter at the handler instead
     noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer", "ddgs", "primp")
-    for handler in logging.getLogger().handlers:
+    root = logging.getLogger()
+    for handler in root.handlers:
         handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
+    # Write log lines from a background thread: if the console stops accepting output (text
+    # selected, Pause pressed), only logging waits, never listening, thinking or speaking
+    import logging.handlers
+    import queue
+
+    log_queue: queue.Queue = queue.Queue()
+    logging.handlers.QueueListener(log_queue, *root.handlers, respect_handler_level=True).start()
+    root.handlers = [logging.handlers.QueueHandler(log_queue)]
+    _disable_console_quick_edit()
 
     if args.list_devices:
         import sounddevice as sd
