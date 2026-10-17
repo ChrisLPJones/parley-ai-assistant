@@ -28,15 +28,31 @@ class Speaker:
                 download(MODEL_URL + name, model_dir / name)
         start = time.perf_counter()
         ort.set_default_logger_severity(3)  # errors only; ORT warns about harmless graph details
-        providers: list = ["CPUExecutionProvider"]
-        if cfg.device != "cpu" and "CUDAExecutionProvider" in ort.get_available_providers():
+        if cfg.device not in ("auto", "cuda", "cpu"):
+            raise SystemExit(f"Unknown tts.device {cfg.device!r}; choose auto, cuda or cpu")
+        want_cuda = cfg.device == "cuda" or (cfg.device == "auto" and gpu.nvidia() is not None)
+        if want_cuda and "CUDAExecutionProvider" in ort.get_available_providers():
             gpu.add_cuda_dll_dirs()
             # Every sentence has a different input length; an exhaustive cuDNN algorithm search
             # per new shape would add hundreds of ms, so pick algorithms heuristically
-            providers.insert(0, ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
-        session = ort.InferenceSession(str(model_dir / MODEL_FILES[0]), providers=providers)
-        self.kokoro = Kokoro.from_session(session, str(model_dir / MODEL_FILES[1]))
-        self.synth("Ready.")
+            gpu_providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
+        else:
+            gpu_providers = None
+        model = str(model_dir / MODEL_FILES[0])
+        voices = str(model_dir / MODEL_FILES[1])
+        session = None
+        if gpu_providers:
+            try:
+                session = ort.InferenceSession(model, providers=gpu_providers)
+                self.kokoro = Kokoro.from_session(session, voices)
+                self.synth("Ready.")  # kernels only fail at the first run, so warm up inside the try
+            except Exception as e:
+                log.warning("Voice on GPU failed (%s); using the CPU instead", e)
+                session = None
+        if session is None:
+            session = ort.InferenceSession(model, providers=["CPUExecutionProvider"])
+            self.kokoro = Kokoro.from_session(session, voices)
+            self.synth("Ready.")
         log.info("Voice ready: %s on %s (%.1fs)", cfg.voice, session.get_providers()[0], time.perf_counter() - start)
 
     def synth(self, text: str) -> np.ndarray:

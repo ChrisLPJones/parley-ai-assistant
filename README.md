@@ -24,13 +24,33 @@ toolkit, model caches) is used.
 
 | Stage | What | Notes |
 |---|---|---|
-| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU |
-| LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on AMD/Intel, Metal on Mac |
+| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU (AMD and Intel GPUs can't run it, so the CPU does) |
+| LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on a discrete AMD/Intel GPU, CPU otherwise, Metal on Mac |
 | LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise |
-| Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime, or CPU |
+| Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime on NVIDIA, otherwise CPU (already faster than real time) |
 
 The local models are deliberately small so Parley runs on ordinary laptops. CUDA libraries come
 from pip and llama.cpp's own release, so only a graphics driver is needed.
+
+### Which hardware is used
+
+Parley picks at startup and logs what it found (`Hardware: ...`). It never fails because of a GPU:
+if a GPU path doesn't start it falls back to the CPU.
+
+| Hardware | Speech-to-text | LLM | Text-to-speech | Status |
+|---|---|---|---|---|
+| NVIDIA GPU | CUDA | CUDA | CUDA | tested (RTX 5090) |
+| Discrete AMD GPU (4 GB or more) | CPU | Vulkan | CPU | design only, not tested on a discrete card |
+| Discrete Intel GPU (Arc) | CPU | Vulkan | CPU | **unverified**: no Intel hardware was available |
+| Integrated GPU only (AMD or Intel), or no GPU | CPU | CPU | CPU | AMD integrated tested; Intel **unverified** |
+| Intel CPU | CPU paths as above | | | **unverified** (same code as AMD CPUs; thread count tuning for hybrid P/E-core chips is untested) |
+
+Integrated GPUs are not used for the LLM: on the test machine's small Radeon the first word took
+about 10 s through Vulkan against about 1.2 s on the CPU. Kokoro's DirectML build (the only way to run
+it on AMD/Intel GPUs) fails on this model, so voice stays on the CPU there. Override the LLM choice with
+`runtime` under `[llm]` (`cuda`, `vulkan` or `cpu`), the voice with `device` under `[tts]`, and Whisper's
+CPU threads with `cpu_threads` under `[stt]`. Setting `runtime = "cpu"` is also the escape hatch if a
+GPU driver produces garbage output without crashing.
 
 ### Using Claude or OpenAI instead
 
