@@ -263,6 +263,18 @@ class OffModeTests(unittest.TestCase):
                 cfg.updates.check = True
                 self.assertIsNotNone(autoupdate.create(FakeApp(), cfg).updater)
 
+    def test_bad_build_feed_url_turns_updates_off_instead_of_crashing_startup(self):
+        with tempfile.TemporaryDirectory(prefix="parley_test_wire_") as d:
+            root = Path(d)
+            seed(root, "0.1.0", tree())
+            with mock.patch.object(autoupdate, "install_root", return_value=root), \
+                    mock.patch.object(update, "build_info", return_value=update.BuildInfo("http://bad.example/parley/version.json")):
+                with self.assertRaises(update.UpdateError):  # what create() does with it
+                    autoupdate.create(FakeApp(), Config())
+                with self.assertLogs("parley.__main__", "WARNING") as logs:
+                    self.assertIsNone(cli.create_update_flow(FakeApp(), Config()))
+                self.assertIn("Updates are off", logs.output[0])
+
     def test_feed_url_is_not_a_config_setting(self):
         from dataclasses import fields
         self.assertEqual([f.name for f in fields(Config().updates)], ["check"])

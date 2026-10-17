@@ -15,7 +15,7 @@ CUDA toolkit) -> scripts/build.py (also regenerates cuda_pack.json; it must equa
 
 The version comes only from `__version__` in the exported source (bumping it is a normal PR). The script never pushes or tags: it
 prints the `git tag` command for the coordinator. It refuses: `--allow-rejected-paths` builds, an unknown ref, an ssh publish of a ref
-that is not on origin/main, a version not greater than the published one (unless --force-republish), a feed URL that is not https
+that is not on a freshly fetched origin/main, a version not greater than the published one (unless --force-republish), a feed URL that is not https
 (the localhost-http escape exists for local test targets only), and a tag that already points at another commit.
 Rollback = fix forward with a higher version, or restore version.json.prev before clients update.
 """
@@ -37,11 +37,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from parley import launcher  # noqa: E402
-from parley.update import (PLATFORM_KEY, UpdateError, Updater, parse_index, parse_manifest,  # noqa: E402
+from parley.update import (MAX_MANIFEST_BYTES, PLATFORM_KEY, UpdateError, Updater, parse_index, parse_manifest,  # noqa: E402
                            validate_index_files)
 from parley.version import compare_versions, parse_version  # noqa: E402
 
@@ -52,7 +54,7 @@ DEFAULT_REMOTE_ROOT = "/srv/updates/parley"
 MAX_NOTES = 1500  # the client's prompt shows at most this much
 MAX_NOTES_FILE = 64 * 1024
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", re.ASCII)
 _REMOTE_ROOT = re.compile(r"/[A-Za-z0-9._/-]{1,200}", re.ASCII)
@@ -67,6 +69,13 @@ class ReleaseError(Exception):
 
 def git(*args: str, repo: Path = ROOT) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def fetch_origin_main(repo: Path = ROOT) -> None:
+    """A real publish must see the current origin/main: a stale local copy could make an old commit look merged."""
+    r = git("fetch", "origin", "main", repo=repo)
+    if r.returncode != 0:
+        raise ReleaseError(f"git fetch origin main failed, so origin/main may be stale: {r.stderr.strip()[-200:]}")
 
 
 def resolve_ref(ref: str, repo: Path = ROOT) -> str:
@@ -305,14 +314,17 @@ def make_layout(install_tree: Path, installer: Path, version: str, notes: str, r
 
 # ---------- publish: version check ----------
 
-def parse_published_version(raw: bytes | None) -> str | None:
+def parse_published_version(raw: bytes | None, force: bool = False) -> str | None:
     """Version in a published version.json, None if there is none. An unreadable one is an error (force-republish skips)."""
     if raw is None:
         return None
     try:
         v = json.loads(raw.decode("utf-8"))["version"]
         parse_version(v)
-    except (ValueError, KeyError, TypeError, AttributeError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:  # UnicodeDecodeError is a ValueError
+        if force:
+            print(f"WARNING: the published version.json is unreadable ({e}); --force-republish replaces it", file=sys.stderr)
+            return None
         raise ReleaseError(f"the published version.json is unreadable ({e}); fix it by hand or use --force-republish") from e
     return v
 
@@ -347,9 +359,9 @@ def _atomic_write(dst: Path, data: bytes) -> None:
     os.replace(tmp, dst)
 
 
-def read_local_version(target: Path) -> str | None:
+def read_local_version(target: Path, force: bool = False) -> str | None:
     p = target / "version.json"
-    return parse_published_version(p.read_bytes() if p.is_file() else None)
+    return parse_published_version(p.read_bytes() if p.is_file() else None, force)
 
 
 def publish_local(layout: Layout, target: Path, on_step: Callable[[str], None] | None = None) -> None:
@@ -391,16 +403,17 @@ def remote(script: str, *args: str) -> str:
     return shlex.join(["sh", "-c", script, "sh", *args])
 
 
+# Each script starts with umask 022 (files and dirs the scripts create are world-readable, never group-writable).
 # Each script gets $1 = remote root, $2 = version.
-REMOTE_READ_VERSION = 'if [ -f "$1/version.json" ]; then cat "$1/version.json"; fi'
-REMOTE_PREPARE = ('set -eu; mkdir -p "$1/blobs" "$1/$2/windows-x64"; rm -rf "$1/incoming-$2"; '
+REMOTE_READ_VERSION = 'umask 022; if [ -f "$1/version.json" ]; then cat "$1/version.json"; fi'
+REMOTE_PREPARE = ('umask 022; set -eu; mkdir -p "$1/blobs" "$1/$2/windows-x64"; rm -rf "$1/incoming-$2"; '
                   'ls -1 "$1/blobs"')
-REMOTE_MOVE = ('set -eu; root=$1; inc="$1/incoming-$2"; chmod -R u=rwX,go=rX "$inc"; '
+REMOTE_MOVE = ('umask 022; set -eu; root=$1; inc="$1/incoming-$2"; chmod -R u=rwX,go=rX "$inc"; '
                'if [ -d "$inc/blobs" ]; then for f in "$inc"/blobs/*; do [ -e "$f" ] && mv -f "$f" "$root/blobs/"; done; fi; '
                'mkdir -p "$root/$2/windows-x64"; '
                'mv -f "$inc/$2/windows-x64/files.json" "$root/$2/windows-x64/files.json"; '
                'mv -f "$inc/Parley-Setup-$2.exe" "$root/Parley-Setup-$2.exe"; rm -rf "$inc"')
-REMOTE_COMMIT = ('set -eu; cd "$1"; chmod 644 version.json.tmp; '
+REMOTE_COMMIT = ('umask 022; set -eu; cd "$1"; chmod 644 version.json.tmp; '
                  'if [ -f version.json ]; then cp -p version.json version.json.prev; fi; mv -f version.json.tmp version.json')
 
 
@@ -451,12 +464,12 @@ def ssh_commands(version: str, host: str, root: str, stage: Path) -> list[Comman
     ]
 
 
-def read_ssh_version(host: str, root: str) -> str | None:
+def read_ssh_version(host: str, root: str, force: bool = False) -> str | None:
     check_ssh_target(host, root)
     r = subprocess.run(["ssh", *SSH_OPTS, host, remote(REMOTE_READ_VERSION, root)], capture_output=True, timeout=60)
     if r.returncode != 0:
         raise ReleaseError(f"cannot read the published version over ssh (exit {r.returncode}): {r.stderr.decode(errors='replace').strip()[-200:]}")
-    return parse_published_version(r.stdout or None)
+    return parse_published_version(r.stdout or None, force)
 
 
 def publish_ssh(layout: Layout, host: str, root: str, work: Path, *, dry_run: bool, runner=subprocess.run) -> None:
@@ -486,6 +499,30 @@ def publish_ssh(layout: Layout, host: str, root: str, work: Path, *, dry_run: bo
             existing = {ln.strip() for ln in r.stdout.splitlines() if _HEX64.fullmatch(ln.strip())}
 
 
+# ---------- post-publish verification ----------
+
+def verify_instruction(url: str, version_json: bytes) -> str:
+    sha = hashlib.sha256(version_json).hexdigest()
+    one_liner = f"import hashlib,urllib.request as u;print(hashlib.sha256(u.urlopen('{url}').read()).hexdigest())"
+    lines = [f"Verify the live manifest (expected sha256 {sha}):", f'  python -c "{one_liner}"',
+             "or pass --verify-url on the next release run."]
+    return "\n".join(lines)
+
+
+def verify_published(url: str, version_json: bytes, *, _allow_http_localhost: bool = False) -> None:
+    """Fetch the live version.json with the shipped update client's own HTTP code (https, certificate checks, same-origin
+    redirects only) and require the exact bytes just published. Raises ReleaseError loudly on any difference."""
+    try:
+        client = Updater(url, "0.0.0", _allow_http_localhost=_allow_http_localhost)
+        got = client._get_bytes(url, MAX_MANIFEST_BYTES)
+    except (UpdateError, httpx.HTTPError, OSError) as e:
+        raise ReleaseError(f"VERIFY FAILED: could not fetch {url}: {e}") from e
+    if hashlib.sha256(got).digest() != hashlib.sha256(version_json).digest():
+        raise ReleaseError(f"VERIFY FAILED: {url} serves sha256 {hashlib.sha256(got).hexdigest()}, "
+                           f"published {hashlib.sha256(version_json).hexdigest()}")
+    print(f"verified: {url} serves the published version.json (sha256 {hashlib.sha256(got).hexdigest()})", flush=True)
+
+
 # ---------- orchestration ----------
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -497,6 +534,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--target", help="publish to this local directory instead of over ssh (used by tests)")
     ap.add_argument("--ssh-host", default=DEFAULT_HOST, help="ssh alias to publish to")
     ap.add_argument("--remote-dir", default=DEFAULT_REMOTE_ROOT, help="directory on the server")
+    ap.add_argument("--verify-url", help="after publishing, fetch this https version.json with the update client's code and "
+                    "require it to equal the published manifest (fails loudly); without it the exact manual check is printed")
     ap.add_argument("--dry-run", action="store_true", help="build, then print the exact publish commands and run none")
     ap.add_argument("--force-republish", action="store_true", help="allow a version equal to or older than the published one")
     ap.add_argument("--work-dir", help="empty/new dir for the export and build (default: a temp dir, removed on success)")
@@ -519,6 +558,8 @@ def validate_args(a: argparse.Namespace) -> str:
     if a.test_http_feed and not a.feed_url.startswith("http://"):
         raise ReleaseError("--test-http-feed is only for an http://localhost feed URL")
     check_feed_url(a.feed_url, test_http_local=bool(a.test_http_feed))
+    if a.verify_url:
+        check_feed_url(a.verify_url, test_http_local=bool(a.test_http_feed))
     if a.version_override:
         try:
             parse_version(a.version_override)
@@ -534,6 +575,8 @@ def run(argv: list[str] | None = None, export_hook: Callable[[Path], None] | Non
     deliberately broken release; it only ever sees the throwaway export)."""
     a = parse_args(argv)
     notes = validate_args(a)
+    if not a.target and not a.dry_run:
+        fetch_origin_main()
     sha = resolve_ref(a.ref)
     if not a.target:
         require_on_main(sha)
@@ -551,7 +594,8 @@ def run(argv: list[str] | None = None, export_hook: Callable[[Path], None] | Non
         if export_hook:
             export_hook(export)
         target = Path(a.target) if a.target else None
-        published = read_local_version(target) if target else (None if a.dry_run else read_ssh_version(a.ssh_host, a.remote_dir))
+        published = read_local_version(target, a.force_republish) if target else (
+            None if a.dry_run else read_ssh_version(a.ssh_host, a.remote_dir, a.force_republish))
         if target is None and a.dry_run:
             print("DRY RUN: not connecting, so the published version is not compared")
         check_newer(version, published, a.force_republish)
@@ -572,6 +616,11 @@ def run(argv: list[str] | None = None, export_hook: Callable[[Path], None] | Non
             print(f"published to {target}")
         else:
             publish_ssh(layout, a.ssh_host, a.remote_dir, work, dry_run=a.dry_run)
+        if not a.dry_run:
+            if a.verify_url:
+                verify_published(a.verify_url, layout.version_json, _allow_http_localhost=bool(a.test_http_feed))
+            else:
+                print(verify_instruction(a.feed_url, layout.version_json))
         if not a.version_override:
             print("\nNot tagged or pushed by this script. Coordinator, after the publish succeeded:\n  " + shlex.join(tag_command(version, sha)))
         ok = True

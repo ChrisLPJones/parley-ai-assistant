@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: test-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # a push run on main is never cancelled by a later push
 
 jobs:
   test:
@@ -65,4 +65,4 @@ jobs:
       - name: Export locked runtime dependencies
         run: uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements-audit.txt
       - name: pip-audit (fails on any known vulnerability)
-        run: uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip
+        run: uvx pip-audit==2.10.1 -r requirements-audit.txt --no-deps --disable-pip

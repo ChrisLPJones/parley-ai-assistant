@@ -10,6 +10,8 @@ from pathlib import Path
 
 from . import __version__, config
 
+log = logging.getLogger(__name__)
+
 
 def _parse_key(name: str):
     from pynput import keyboard
@@ -130,6 +132,17 @@ def test_mic(cfg, seconds: int = 4) -> None:
     print(f"Heard: {stt.transcribe(audio) or '(nothing recognised)'}")
 
 
+def create_update_flow(app, cfg):
+    """The update flow, or None: unpackaged runs have none, and any failure creating it (e.g. a bad build-time feed URL)
+    only turns updates off; it must never stop Parley from starting."""
+    from . import autoupdate
+    try:
+        return autoupdate.create(app, cfg)
+    except Exception as e:
+        log.warning("Updates are off: %s", e)
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="parley", description="Local push-to-talk voice assistant.")
     parser.add_argument("--config", type=Path, help=f"config file (default: {config.default_config_path()})")
@@ -174,8 +187,7 @@ def main() -> None:
     app = Parley(cfg, use_mic=args.ask is None)
     flow = None
     if args.ask is None:
-        from . import autoupdate
-        flow = autoupdate.create(app, cfg)  # None unless this is a packaged copy
+        flow = create_update_flow(app, cfg)
     try:
         if args.ask:
             app.ask(args.ask)
