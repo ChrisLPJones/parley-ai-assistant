@@ -1,5 +1,6 @@
 """Speech-to-text with faster-whisper (CTranslate2), GPU when available."""
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -32,9 +33,9 @@ class Transcriber:
                 self.model = None
         if self.model is None:
             self.name = self._model_name(gpu=False)
-            self.model = self._load(WhisperModel, self.name, "cpu", "int8")
+            self.model = self._load(WhisperModel, self.name, "cpu", "int8", cpu_threads=self._cpu_threads())
             self._warm_up()
-            where = "CPU"
+            where = f"CPU ({self._cpu_threads()} threads)"
         log.info("Speech recognition ready: %s on %s (%.1fs)", self.name, where, time.perf_counter() - start)
 
     def _model_name(self, gpu: bool) -> str:
@@ -44,17 +45,25 @@ class Transcriber:
             return "large-v3-turbo"
         return "small.en" if self.cfg.language == "en" else "small"  # ~1s per question on a laptop CPU
 
-    def _load(self, WhisperModel, name: str, device: str, compute_type: str):
+    def _cpu_threads(self) -> int:
+        """CTranslate2 defaults to 4 threads. Half the logical cores (physical cores on most CPUs,
+        and it avoids the efficiency cores of hybrid Intel chips), capped where more stops helping."""
+        if self.cfg.cpu_threads > 0:
+            return self.cfg.cpu_threads
+        return max(4, min(8, (os.cpu_count() or 8) // 2))
+
+    def _load(self, WhisperModel, name: str, device: str, compute_type: str, cpu_threads: int = 0):
         # Stay offline once the model is cached; only the first run downloads it
         from huggingface_hub.errors import LocalEntryNotFoundError
 
         try:
             return WhisperModel(name, device=device, compute_type=compute_type,
-                                download_root=self.model_dir, local_files_only=True)
+                                download_root=self.model_dir, local_files_only=True, cpu_threads=cpu_threads)
         except LocalEntryNotFoundError:
             pass
         log.info("Downloading speech model %s, first run only ...", name)
-        return WhisperModel(name, device=device, compute_type=compute_type, download_root=self.model_dir)
+        return WhisperModel(name, device=device, compute_type=compute_type, download_root=self.model_dir,
+                            cpu_threads=cpu_threads)
 
     def _warm_up(self) -> None:
         # Runs the encoder once so CUDA kernels are loaded before the first real question

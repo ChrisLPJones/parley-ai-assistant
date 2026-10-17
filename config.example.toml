@@ -13,6 +13,7 @@ sounds = true
 [stt]
 model = "auto"             # auto = large-v3-turbo on NVIDIA GPUs, small.en on CPU; or tiny / base / small / medium / large-v3-turbo
 device = "auto"            # auto | cuda | cpu
+cpu_threads = 0            # CPU only: threads for Whisper; 0 = auto (about half the logical cores, max 8)
 compute_type = "default"
 language = "en"            # "" to auto-detect
 beam_size = 1
@@ -29,6 +30,7 @@ preset = "auto"            # auto picks from your hardware: small (Qwen3.5 4B) w
 # model_repo = "unsloth/Qwen3.5-9B-GGUF"   # any GGUF on Hugging Face instead of a preset
 # model_file = "Qwen3.5-9B-Q4_K_M.gguf"
 # model_path = "D:/models/my-model.gguf"    # or a GGUF already on disk
+runtime = "auto"           # auto = CUDA on NVIDIA, Vulkan on a discrete AMD/Intel GPU, else CPU; or force cuda | vulkan | cpu (Intel GPUs: unverified)
 gpu_layers = -1            # -1 = fit to free GPU memory automatically; 0 = CPU only
 num_ctx = 8192
 temperature = 0.7          # local backends only
@@ -55,4 +57,4 @@ web_search = true   # and search the web (DuckDuckGo locally; Claude uses Anthro
 voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
 speed = 1.1
 lang = "en-us"
-device = "auto"     # auto | cpu
+device = "auto"     # auto (CUDA on NVIDIA, else CPU) | cuda | cpu

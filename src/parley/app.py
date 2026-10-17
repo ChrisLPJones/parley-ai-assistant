@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import gpu
 from .audio import MIC_RATE, Player, Recorder, tone
 from .config import Config, app_dir
 from .llm import CLOUD_BACKENDS, create as create_chat
@@ -29,6 +30,7 @@ class Parley:
         self.finished = threading.Event()  # set once a turn's answer has been fully played
 
         home = app_dir()
+        log.info("Hardware: %s", gpu.describe())
         # The LLM loads into VRAM in the background while speech models load
         llm_ready = threading.Thread(target=self._start_llm, args=(home,), daemon=True)
         llm_ready.start()

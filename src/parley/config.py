@@ -48,6 +48,8 @@ class SttConfig:
     compute_type: str = "default"  # default | float16 | int8_float16 | int8
     language: str = "en"  # "" = auto-detect
     beam_size: int = 1
+    # CPU only: threads for Whisper. 0 = auto (about half the logical cores, max 8); CTranslate2's own default is 4
+    cpu_threads: int = 0
 
 
 @dataclass
@@ -61,6 +63,9 @@ class LlmConfig:
     model_repo: str = ""  # builtin: any GGUF on Hugging Face instead of a preset, e.g. "unsloth/Qwen3.5-9B-GGUF"
     model_file: str = ""  #   ...and the file in that repo, e.g. "Qwen3.5-9B-Q4_K_M.gguf"
     model_path: str = ""  # builtin: or a GGUF file already on disk
+    # builtin: where llama.cpp runs. auto = CUDA on NVIDIA, Vulkan on a discrete AMD/Intel GPU, otherwise the CPU
+    # (integrated GPUs are not faster than a modern CPU); or force cuda | vulkan | cpu. Intel GPUs: unverified.
+    runtime: str = "auto"
     gpu_layers: int = -1  # builtin: layers on the GPU; -1 = fit automatically to free memory
     model: str = ""  # anthropic: default claude-opus-5-5; openai: default chat-latest; ollama/server: "" = first available
     api_key: str = ""  # anthropic/openai; leave empty to use the ANTHROPIC_API_KEY / OPENAI_API_KEY env var
@@ -86,7 +91,8 @@ class TtsConfig:
     voice: str = "af_heart"
     speed: float = 1.1
     lang: str = "en-us"
-    device: str = "auto"  # auto | cpu
+    # auto = CUDA on NVIDIA, otherwise CPU (Kokoro's DirectML build fails on this model, so AMD/Intel GPUs aren't used)
+    device: str = "auto"  # auto | cuda | cpu
 
 
 @dataclass
