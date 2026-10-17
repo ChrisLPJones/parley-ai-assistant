@@ -1,7 +1,8 @@
 # Parley
 
-A push-to-talk voice assistant that runs entirely on your own machine. Hold a key, talk, let go,
-and a local LLM answers out loud. No cloud services, no accounts, nothing leaves your PC.
+A push-to-talk voice assistant that runs on your own machine. Hold a key, talk, let go, and a
+local LLM answers out loud. By default there are no cloud services and no accounts, and nothing
+leaves your PC.
 
 ```
 hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) ──► Kokoro TTS ──► speakers
@@ -11,10 +12,100 @@ hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) �
 
 **Why it feels fast**
 
-- Every model is loaded and warmed up at startup and stays resident in VRAM.
+- Every model is loaded and warmed up at startup and stays resident (in VRAM when there is an NVIDIA GPU).
 - The mic stream is always open with a short pre-roll, so recording starts instantly and your first word isn't clipped.
 - The answer is spoken sentence by sentence while the LLM is still generating, so speech starts after the first sentence, not the whole reply.
 - Pressing the hotkey again interrupts the current answer immediately.
+
+Status: version 0.1.0, early. Windows 10/11 is the only tested platform.
+
+## Using it
+
+1. Start Parley (see [Install and run](#install-and-run-windows)) and wait for it to say it is ready.
+2. Hold **Pause** (the default hotkey), speak, and release to send.
+3. Press the hotkey again while Parley is talking to interrupt it.
+
+### What you can ask it to do
+
+Besides answering questions, Parley can act on your computer and look things up:
+
+- **"What's in here?" / "How many files are in this folder?"** with File Explorer open (counts, sizes, file types)
+- **"Read this"** with a file selected in Explorer, or "read notes.txt in Downloads"
+- **"Find my CV"**, **"Open Downloads"**, **"Open Spotify"**, **"Open youtube.com"**
+- **"What's the weather in Auckland?"** or anything current, via web search
+
+"This" and "here" mean the folder and selection in the File Explorer window you're using.
+Everything is read-only except opening things, and Parley only opens folders, documents, websites
+and Start menu apps, never scripts or programs by path. Files that may hold secrets (SSH keys,
+`.env`, credential stores) are off limits. Turn tools off with `[tools] enabled = false`.
+
+### Cloud backends and privacy
+
+By default everything runs locally. For smarter answers, the LLM step can use the Anthropic or
+OpenAI API while speech recognition and the voice stay local. With a cloud backend, **only the
+transcribed text leaves your machine** (never audio), plus anything a tool reads for the
+conversation, such as the contents of a file you asked about.
+
+```toml
+# %LOCALAPPDATA%\parley\config.toml
+[llm]
+backend = "anthropic"   # or "openai"
+```
+
+Then set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment (or `api_key` in the config).
+Defaults are `claude-opus-5-5` (at low effort for quick replies) and OpenAI's `chat-latest`;
+change either with `model`. Any other GGUF works locally via `model_repo` + `model_file`, and
+`backend = "ollama"` / `"server"` uses a local server you already run.
+
+## Install and run (Windows)
+
+A packaged installer is planned but does not exist yet. For now you run Parley from source.
+
+Prerequisites:
+
+- Windows 10 or 11
+- [uv](https://docs.astral.sh/uv/)
+- A microphone
+- Optional: an NVIDIA graphics driver, for GPU speed and the more accurate speech model. Parley also runs on CPU-only laptops. You do not need the CUDA toolkit.
+
+```sh
+git clone https://github.com/ChrisLPJones/parley
+cd parley
+uv run parley
+```
+
+The first run downloads everything Parley needs (speech, language and voice models and the
+llama.cpp runtime). This is several GB and progress is shown. Later starts take a few seconds and
+work offline (except cloud backends and web search).
+
+```sh
+uv run parley --ask "what's the capital of Peru?"   # typed question through the whole pipeline, no mic
+uv run parley --test-mic                            # microphone check
+uv run parley --list-devices                        # list mics/speakers for the config
+uv run parley -v                                    # debug logging with latency timings
+```
+
+## Build
+
+There is no compile step: Parley is a Python package (3.11 to 3.13) run with uv. `uv build`
+produces a wheel using hatchling. A standalone installer is not built yet.
+
+## Linux (experimental, untested)
+
+Linux support has not been tested. Nothing here is known to work. To try it from source:
+
+```sh
+# Ubuntu: sudo apt install libportaudio2      Fedora: sudo dnf install portaudio
+git clone https://github.com/ChrisLPJones/parley
+cd parley
+uv run parley
+```
+
+Expect problems:
+
+- The global hotkey needs an X11 session; under Wayland it will likely fail.
+- `pywin32` is a Windows-only dependency, and the Windows-only features (Explorer "this folder" and selection, GPU detection) are unavailable.
+- Known open issues: the pip-installed CUDA libraries may not be found, because Parley extends `PATH` but not `LD_LIBRARY_PATH`; the pynput win32 filter is unverified on Linux; the Linux llama.cpp release asset names are unverified.
 
 ## Components
 
@@ -29,8 +120,8 @@ toolkit, model caches) is used.
 | LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise |
 | Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime on NVIDIA, otherwise CPU (already faster than real time) |
 
-The local models are deliberately small so Parley runs on ordinary laptops. CUDA libraries come
-from pip and llama.cpp's own release, so only a graphics driver is needed.
+The local models are deliberately small so Parley runs on ordinary laptops, which means answers
+are simple. CUDA libraries come from pip and llama.cpp's own release, so only a graphics driver is needed.
 
 ### Which hardware is used
 
@@ -47,70 +138,17 @@ if a GPU path doesn't start it falls back to the CPU.
 
 Integrated GPUs are not used for the LLM: on the test machine's small Radeon the first word took
 about 10 s through Vulkan against about 1.2 s on the CPU. Kokoro's DirectML build (the only way to run
-it on AMD/Intel GPUs) fails on this model, so voice stays on the CPU there. Override the LLM choice with
-`runtime` under `[llm]` (`cuda`, `vulkan` or `cpu`), the voice with `device` under `[tts]`, and Whisper's
-CPU threads with `cpu_threads` under `[stt]`. Setting `runtime = "cpu"` is also the escape hatch if a
-GPU driver produces garbage output without crashing.
+it on AMD/Intel GPUs) fails on this model, so voice stays on the CPU there.
 
-### Using Claude or OpenAI instead
+## Configuration
 
-For smarter answers, the LLM step can use a cloud API while speech recognition and the voice stay
-local. Only the transcribed text of your question is sent.
+Parley keeps everything in a home folder, or `$PARLEY_HOME` if set:
 
-```toml
-# %LOCALAPPDATA%\parley\config.toml
-[llm]
-backend = "anthropic"   # or "openai"
-```
-
-Then set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment (or `api_key` in the config).
-Defaults are `claude-opus-5-5` (at low effort for quick replies) and OpenAI's `chat-latest`;
-change either with `model`. Any other GGUF works locally via `model_repo` + `model_file`, and
-`backend = "ollama"` / `"server"` uses a local server you already run.
-
-## What you can ask it to do
-
-Besides answering questions, Parley can act on your computer and look things up:
-
-- **"What's in here?" / "How many files are in this folder?"** with File Explorer open (counts, sizes, file types)
-- **"Read this"** with a file selected in Explorer, or "read notes.txt in Downloads"
-- **"Find my CV"**, **"Open Downloads"**, **"Open Spotify"**, **"Open youtube.com"**
-- **"What's the weather in Auckland?"** or anything current, via web search
-
-"This" and "here" mean the folder and selection in the File Explorer window you're using.
-Everything is read-only except opening things, and Parley only opens folders, documents, websites
-and Start menu apps, never scripts or programs by path. Files that may hold secrets (SSH keys,
-`.env`, credential stores) are off limits. With a cloud backend, whatever a tool reads is sent to
-that provider as part of the conversation. Turn tools off with `[tools] enabled = false`.
-
-## Requirements
-
-- Windows 10/11 (Linux and macOS should work, untested)
-- Runs on CPU-only laptops; an NVIDIA GPU makes speech recognition more accurate and everything faster.
-- [uv](https://docs.astral.sh/uv/)
-- Disk: about 2-5 GB depending on hardware
-
-## Run
-
-```sh
-git clone https://github.com/ChrisLPJones/parley
-cd parley
-uv run parley
-```
-
-The first run downloads everything (progress is shown); later starts take a few seconds and are fully offline.
-Hold **Pause** (default) and speak; release to send. Press it again while Parley is talking to interrupt.
-
-```sh
-uv run parley --ask "what's the capital of Peru?"   # typed question, no mic
-uv run parley --list-devices                        # pick mic/speakers for the config
-uv run parley -v                                    # debug logging with latency timings
-```
-
-## Files and configuration
-
-Parley keeps everything in `%LOCALAPPDATA%\parley` (`~/.local/share/parley` on Linux,
-`~/Library/Application Support/parley` on macOS), or `$PARLEY_HOME` if set:
+| OS | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\parley` |
+| Linux | `~/.local/share/parley` |
+| macOS | `~/Library/Application Support/parley` |
 
 ```
 config.toml        your settings (copy config.example.toml; every key is optional)
@@ -119,8 +157,26 @@ runtime/           llama.cpp build
 logs/              llama-server.log
 ```
 
-Delete the folder to uninstall completely.
+Delete the folder to uninstall completely. Key settings (all in `config.example.toml`):
 
-## License
+| Section | Key | Meaning |
+|---|---|---|
+| `[hotkey]` | `key` | Hold-to-talk key, default `pause` (also `f13`, `scroll_lock`, `ctrl_r`, `insert`, or a single character) |
+| `[audio]` | `input_device`, `output_device` | Name substring or index from `--list-devices` |
+| `[stt]` | `model`, `device`, `language`, `cpu_threads` | `auto` picks by hardware; language `en` by default (`""` auto-detects); Whisper CPU threads (0 = auto) |
+| `[llm]` | `backend` | `builtin` (default), `anthropic`, `openai`, `ollama`, `server` |
+| `[llm]` | `preset`, `model_repo`, `model_file`, `model_path` | Which local model (builtin backend) |
+| `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
+| `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search |
+| `[tts]` | `voice`, `speed`, `device` | Kokoro voice, speed, and `auto`/`cuda`/`cpu` |
+
+## Troubleshooting
+
+- **No Pause key (most laptops):** set a different key under `[hotkey]`, for example `key = "f13"`, `"scroll_lock"` or `"ctrl_r"`.
+- **Nothing happens when you speak:** run `uv run parley --test-mic`, and use `--list-devices` to set `input_device` under `[audio]`.
+- **Garbled or nonsense answers on a GPU without a crash (for example Vulkan):** set `runtime = "cpu"` under `[llm]`.
+- **Need more detail:** run with `-v` for debug logging and latency timings; the local LLM log is in `logs/llama-server.log` in the Parley home.
+
+## Licence
 
 MIT
