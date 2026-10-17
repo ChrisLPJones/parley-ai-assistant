@@ -108,6 +108,13 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             parse_manifest(self.good(), "linux-x64")
 
+    def test_installer_name_rules(self):
+        for name in ["NUL", "CON", "nul.exe", "setup", "setup.exe.txt", "a b.exe", ".exe", "con .exe"]:
+            doc = {"schema": 1, "version": "0.2.0", "platforms": {"windows-x64": {
+                "file": name, "sha256": "a" * 64, "size": 1}}}
+            with self.assertRaises(UpdateError, msg=name):
+                parse_manifest(json.dumps(doc).encode())
+
     def test_bad_input(self):
         cases = [b"not json", b"[]", b"\xff\xfe", b"{" * 5000, b"x" * (update.MAX_MANIFEST_BYTES + 1),
                  self.good(schema=2), self.good(schema=True), self.good(version="1.0"),
@@ -130,7 +137,9 @@ class ParseTests(unittest.TestCase):
 class PathTests(unittest.TestCase):
     def test_bad_paths(self):
         for p in ["../x", "a/../x", "/abs", "C:/x", "C:x", "a\\b", "a//b", "a/./b", "", ".", "x/", "con", "dir/NUL.txt",
-                  "a/com1", "trail.", "sp ace /x", "a:stream", "q?", "x\x00y", 5, None, "a" * 300]:
+                  "a/com1", "trail.", "sp ace /x", "a:stream", "q?", "x\x00y", 5, None, "a" * 300,
+                  "con .txt", "nul .x", "COM¹", "lpt².txt", "x/aux.", "a\x7fb", "a‮b", "a b",
+                  "café", "a b"]:
             with self.assertRaises(UpdateError, msg=repr(p)):
                 update.validate_rel_path(p)
 
@@ -282,6 +291,31 @@ class ClientTests(unittest.TestCase):
         u = self.updater()
         self.srv.close()
         self.assertIsNone(u.check())
+
+    def test_feed_url_needs_path(self):
+        for url in ["https://example.com", "https://example.com/"]:
+            with self.assertRaises(UpdateError, msg=url):
+                Updater(url, "0.1.0")
+
+    def test_download_verified_aborts_on_excess_bytes(self):
+        from contextlib import contextmanager
+        from parley.download import download_verified
+
+        class Resp:
+            def iter_bytes(self, n):
+                yield b"a" * 6
+                yield b"b" * 6
+                raise AssertionError("kept reading after the size limit")
+
+        @contextmanager
+        def opener(url):
+            yield Resp()
+
+        dest = self.dir / "x.bin"
+        with self.assertRaises(DownloadError):
+            download_verified(opener, "u", dest, sha(b"a" * 6), 10)
+        self.assertFalse(dest.exists())
+        self.assertFalse((self.dir / "x.bin.part").exists())
 
     def test_https_only(self):
         with self.assertRaises(UpdateError):

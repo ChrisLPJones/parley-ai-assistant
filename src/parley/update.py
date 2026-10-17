@@ -36,8 +36,10 @@ MAX_REDIRECTS = 3
 TIMEOUT = httpx.Timeout(10.0, read=30.0)
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", re.ASCII)
-_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
-_BAD_CHARS = set('<>:"|?*\\')
+_PART = re.compile(r"[A-Za-z0-9._-]{1,128}", re.ASCII)  # one path component: ASCII only (no spaces, DEL, bidi, NBSP)
+_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$",
+             *(f"com{i}" for i in [*range(1, 10), "\u00b9", "\u00b2", "\u00b3"]),
+             *(f"lpt{i}" for i in [*range(1, 10), "\u00b9", "\u00b2", "\u00b3"])}
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -110,14 +112,18 @@ def _text(v: object, what: str, limit: int) -> str:
     return "".join(c for c in v if c in "\n\t" or unicodedata.category(c)[0] != "C")
 
 
+def _is_reserved(name: str) -> bool:
+    """Windows device names, also with an extension or trailing spaces before the dot (`con .txt`)."""
+    stem = name.split(".")[0].rstrip(" ").lower()
+    return stem in _RESERVED
+
+
 def validate_rel_path(path: object) -> str:
     """A safe relative path using forward slashes: no `..`, absolute or drive paths, reserved names."""
     if not isinstance(path, str) or not path or len(path) > 240:
         raise UpdateError("bad path")
-    if path.startswith("/") or "//" in path or any(c in _BAD_CHARS or ord(c) < 32 for c in path):
-        raise UpdateError("bad path")
     for part in path.split("/"):
-        if part in ("", ".", "..") or part != part.rstrip(". ") or part.split(".")[0].lower() in _RESERVED:
+        if not _PART.fullmatch(part) or part in (".", "..") or part != part.rstrip(". ") or _is_reserved(part):
             raise UpdateError("bad path")
     return path
 
@@ -176,7 +182,7 @@ def _load_json(raw: bytes) -> dict:
 
 def _platform_entry(src: dict, version: str) -> PlatformEntry:
     name = src.get("file")
-    if not isinstance(name, str) or not _FILE_NAME.fullmatch(name) or name.startswith("."):
+    if not isinstance(name, str) or not _FILE_NAME.fullmatch(name)             or not name.lower().endswith(".exe") or _is_reserved(name):
         raise UpdateError("bad file name")
     index, index_sha = src.get("index"), src.get("index_sha256")
     if index is not None:
@@ -263,6 +269,8 @@ class Updater:
         self._http_local = _allow_http_localhost
         self.feed_url = feed_url
         self._origin = self._check_url(feed_url)
+        if not urlsplit(feed_url).path.strip("/"):
+            raise UpdateError("feed URL needs a path")
         self._base = feed_url.rsplit("/", 1)[0] + "/"
 
     # -- URL safety --
