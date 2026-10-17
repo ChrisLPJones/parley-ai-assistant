@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gpu
+from . import cuda_pack, gpu
 from .audio import MIC_RATE, Player, Recorder, tone
 from .config import Config, app_dir
 from .llm import CLOUD_BACKENDS, create as create_chat
@@ -31,6 +31,8 @@ class Parley:
 
         home = app_dir()
         log.info("Hardware: %s", gpu.describe())
+        if use_mic:  # a typed --ask smoke run never starts a 1.6 GB download
+            cuda_pack.start_background(cfg, gpu.current_plan(), home, self.say)  # packaged NVIDIA copies only
         # The LLM loads into VRAM in the background while speech models load
         llm_ready = threading.Thread(target=self._start_llm, args=(home,), daemon=True)
         llm_ready.start()

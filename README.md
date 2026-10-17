@@ -100,11 +100,20 @@ dependency group (never installed for normal use):
 uv run --group build python scripts/build.py
 ```
 
-It writes `dist\install\` (about 620 MB, CPU path; the NVIDIA CUDA libraries are not bundled yet):
+It writes `dist\install\` (about 620 MB; the NVIDIA CUDA libraries are not bundled, see below):
 `Parley.exe` (a small launcher), `current.json` and `app\<version>\parley-app.exe` with its libraries.
 Run `dist\install\Parley.exe`, or `parley-app.exe --self-check` to test the build. `--feed-url URL` bakes in
 an update server (default: none, so the built copy never checks for updates). `dist\` and `build\` are
 not committed. Release builds must be made in a clean environment (no CUDA toolkit on `PATH`). A packaged installer (`Parley-Setup.exe`) is not built yet.
+
+**CUDA in packaged copies.** On an NVIDIA GPU the built copy downloads the CUDA 12 libraries (cuBLAS, cuDNN, cuFFT, CUDA
+runtime; 6 pinned wheels, about 1.6 GB) once, in the background, on the first run: Parley says so, keeps working on the
+CPU meanwhile, and uses the GPU from the next start. They go to `runtime\cuda12\` in the Parley home, so app updates keep
+them. `scripts/cuda_pack.py` writes `src/parley/cuda_pack.json` (URL, sha256 and size of each wheel, straight from `uv.lock`;
+`build.py` refreshes it, and a test fails if the committed copy differs). Downloads are checked against that hash and
+size, only from `files.pythonhosted.org`; only the listed DLLs are unpacked. If the download fails (offline, disk full,
+bad hash) Parley just stays on the CPU and tries again next start. Set `[gpu] download_cuda = false`, or force
+`device = "cpu"` for speech-to-text and text-to-speech, to opt out. Source checkouts use the pip packages instead.
 
 ## Linux (experimental, untested)
 
@@ -185,6 +194,7 @@ To remove everything, delete this folder and the cloned repo. Key settings (all 
 | `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
 | `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search |
 | `[tts]` | `voice`, `speed`, `device` | Kokoro voice, speed, and `auto`/`cuda`/`cpu` |
+| `[gpu]` | `download_cuda` | Packaged copies only (default `true`): download the CUDA libraries (about 1.6 GB, once) on an NVIDIA GPU; the CPU is used until they are ready |
 | `[updates]` | `check` | Installed copies only (default `true`): look for a newer version after startup and ask before installing; a source checkout never updates itself. The update server is fixed at build time, not configurable |
 
 ## Troubleshooting

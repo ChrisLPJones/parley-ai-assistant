@@ -1,0 +1,80 @@
+{
+  "allowed_hosts": [
+    "files.pythonhosted.org"
+  ],
+  "platform": "win_amd64",
+  "schema": 1,
+  "wheels": [
+    {
+      "dlls": [
+        "nvidia/cublas/bin/cublas64_12.dll",
+        "nvidia/cublas/bin/cublasLt64_12.dll"
+      ],
+      "package": "nvidia-cublas-cu12",
+      "sha256": "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661",
+      "size": 553162896,
+      "url": "https://files.pythonhosted.org/packages/20/e2/fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl",
+      "version": "12.9.2.10"
+    },
+    {
+      "dlls": [
+        "nvidia/cuda_nvrtc/bin/nvrtc64_120_0.dll",
+        "nvidia/cuda_nvrtc/bin/nvrtc-builtins64_129.dll"
+      ],
+      "package": "nvidia-cuda-nvrtc-cu12",
+      "sha256": "72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349",
+      "size": 76408187,
+      "url": "https://files.pythonhosted.org/packages/52/de/823919be3b9d0ccbf1f784035423c5f18f4267fb0123558d58b813c6ec86/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl",
+      "version": "12.9.86"
+    },
+    {
+      "dlls": [
+        "nvidia/cuda_runtime/bin/cudart64_12.dll"
+      ],
+      "package": "nvidia-cuda-runtime-cu12",
+      "sha256": "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
+      "size": 3591604,
+      "url": "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+      "version": "12.9.79"
+    },
+    {
+      "dlls": [
+        "nvidia/cudnn/bin/cudnn64_9.dll",
+        "nvidia/cudnn/bin/cudnn_adv64_9.dll",
+        "nvidia/cudnn/bin/cudnn_cnn64_9.dll",
+        "nvidia/cudnn/bin/cudnn_engines_precompiled64_9.dll",
+        "nvidia/cudnn/bin/cudnn_engines_runtime_compiled64_9.dll",
+        "nvidia/cudnn/bin/cudnn_engines_tensor_ir64_9.dll",
+        "nvidia/cudnn/bin/cudnn_ext64_9.dll",
+        "nvidia/cudnn/bin/cudnn_graph64_9.dll",
+        "nvidia/cudnn/bin/cudnn_heuristic64_9.dll",
+        "nvidia/cudnn/bin/cudnn_ops64_9.dll"
+      ],
+      "package": "nvidia-cudnn-cu12",
+      "sha256": "06e9b0026f3bad97d2b58666330fabec04fe1672f776661ecb0ce0029c27f142",
+      "size": 743068852,
+      "url": "https://files.pythonhosted.org/packages/aa/38/f856579877f7c1c5066e61182e7de7bc27bf35a78c8d1b0fa592e6985bc4/nvidia_cudnn_cu12-9.27.0.42-py3-none-win_amd64.whl",
+      "version": "9.27.0.42"
+    },
+    {
+      "dlls": [
+        "nvidia/cufft/bin/cufft64_11.dll"
+      ],
+      "package": "nvidia-cufft-cu12",
+      "sha256": "8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80",
+      "size": 200067309,
+      "url": "https://files.pythonhosted.org/packages/20/ee/29955203338515b940bd4f60ffdbc073428f25ef9bfbce44c9a066aedc5c/nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl",
+      "version": "11.4.1.4"
+    },
+    {
+      "dlls": [
+        "nvidia/nvjitlink/bin/nvJitLink_120_0.dll"
+      ],
+      "package": "nvidia-nvjitlink-cu12",
+      "sha256": "cc6fcec260ca843c10e34c936921a1c426b351753587fdd638e8cff7b16bb9db",
+      "size": 35584936,
+      "url": "https://files.pythonhosted.org/packages/dd/7e/2eecb277d8a98184d881fb98a738363fd4f14577a4d2d7f8264266e82623/nvidia_nvjitlink_cu12-12.9.86-py3-none-win_amd64.whl",
+      "version": "12.9.86"
+    }
+  ]
+}

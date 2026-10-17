@@ -13,6 +13,7 @@ Anything the update client's path rule rejects (ASCII letters, digits, `.`, `_`,
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -35,6 +36,18 @@ BUILD_PY = ROOT / "src" / "parley" / "_build.py"
 
 class BuildError(Exception):
     pass
+
+
+def refresh_cuda_pack() -> None:
+    """Regenerate src/parley/cuda_pack.json from uv.lock so the bundled copy always matches the pinned wheels."""
+    spec = importlib.util.spec_from_file_location("parley_cuda_pack_script", ROOT / "scripts" / "cuda_pack.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        if mod.generate():
+            print("cuda_pack.json regenerated from uv.lock (commit the change)", file=sys.stderr)
+    except mod.PackError as e:
+        raise BuildError(f"CUDA pack manifest: {e}") from e
 
 
 def build_py_text(feed_url: str, platform: str = PLATFORM_KEY) -> str:
@@ -113,6 +126,7 @@ def main() -> int:
                     help="dev only: build even if some file names fail the update client's path rule")
     args = ap.parse_args()
     t0 = time.time()
+    refresh_cuda_pack()
     saved = BUILD_PY.read_text("utf-8") if BUILD_PY.exists() else None
     BUILD_PY.write_text(build_py_text(args.feed_url), "utf-8")
     try:
