@@ -4,31 +4,16 @@ import re
 import time
 from pathlib import Path
 
-import httpx
 import numpy as np
 
+from . import gpu
 from .config import TtsConfig
+from .download import download
 
 log = logging.getLogger(__name__)
 
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 MODEL_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
-
-
-def ensure_models(model_dir: Path) -> None:
-    model_dir.mkdir(parents=True, exist_ok=True)
-    for name in MODEL_FILES:
-        dest = model_dir / name
-        if dest.exists():
-            continue
-        log.info("Downloading %s ...", name)
-        part = dest.with_suffix(dest.suffix + ".part")
-        with httpx.stream("GET", MODEL_URL + name, follow_redirects=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(part, "wb") as f:
-                for chunk in r.iter_bytes(1 << 20):
-                    f.write(chunk)
-        part.replace(dest)
 
 
 class Speaker:
@@ -37,17 +22,19 @@ class Speaker:
         from kokoro_onnx import Kokoro
 
         self.cfg = cfg
-        ensure_models(model_dir)
+        for name in MODEL_FILES:
+            if not (model_dir / name).exists():
+                log.info("Downloading voice model %s, first run only ...", name)
+                download(MODEL_URL + name, model_dir / name)
         start = time.perf_counter()
-        providers = ["CPUExecutionProvider"]
+        ort.set_default_logger_severity(3)  # errors only; ORT warns about harmless graph details
+        providers: list = ["CPUExecutionProvider"]
         if cfg.device != "cpu" and "CUDAExecutionProvider" in ort.get_available_providers():
-            if hasattr(ort, "preload_dlls"):
-                ort.preload_dlls()  # finds the pip-installed CUDA/cuDNN DLLs
-            providers.insert(0, "CUDAExecutionProvider")
-        ort.set_default_logger_severity(3)
-        opts = ort.SessionOptions()
-        opts.log_severity_level = 3  # errors only; ORT warns about harmless graph details
-        session = ort.InferenceSession(str(model_dir / MODEL_FILES[0]), opts, providers=providers)
+            gpu.add_cuda_dll_dirs()
+            # Every sentence has a different input length; an exhaustive cuDNN algorithm search
+            # per new shape would add hundreds of ms, so pick algorithms heuristically
+            providers.insert(0, ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
+        session = ort.InferenceSession(str(model_dir / MODEL_FILES[0]), providers=providers)
         self.kokoro = Kokoro.from_session(session, str(model_dir / MODEL_FILES[1]))
         self.synth("Ready.")
         log.info("Voice ready: %s on %s (%.1fs)", cfg.voice, session.get_providers()[0], time.perf_counter() - start)

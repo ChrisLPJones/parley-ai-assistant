@@ -12,11 +12,14 @@ dependencies = [
     "numpy>=1.26",
     "httpx>=0.27",
     "pynput>=1.7",
-    # cuBLAS / cuDNN DLLs for faster-whisper on NVIDIA GPUs, so users don't need the CUDA toolkit
+    # One CUDA 12 stack from pip, shared by faster-whisper and Kokoro, so users never install the CUDA toolkit
     "nvidia-cublas-cu12; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cuda-runtime-cu12; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cufft-cu12; sys_platform == 'win32' or sys_platform == 'linux'",
     "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32' or sys_platform == 'linux'",
-    # GPU build of ONNX Runtime for Kokoro (it also runs on CPU when there's no NVIDIA GPU)
-    "onnxruntime-gpu>=1.20; sys_platform == 'win32' or sys_platform == 'linux'",
+    # GPU build of ONNX Runtime for Kokoro; falls back to CPU without an NVIDIA GPU.
+    # 1.25+ is built for CUDA 13, whose cuDNN wheel would clash with CTranslate2's CUDA 12 one.
+    "onnxruntime-gpu>=1.22,<1.25; sys_platform == 'win32' or sys_platform == 'linux'",
 ]
 
 [tool.uv]

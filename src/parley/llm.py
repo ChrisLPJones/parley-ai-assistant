@@ -1,4 +1,5 @@
-"""Streaming chat against a local LLM server (Ollama native API or any OpenAI-compatible server)."""
+"""Streaming chat against the local LLM server: Parley's built-in llama-server, Ollama, or any
+OpenAI-compatible server."""
 import json
 import logging
 import time
@@ -12,21 +13,24 @@ log = logging.getLogger(__name__)
 
 
 class Chat:
-    def __init__(self, cfg: LlmConfig):
+    def __init__(self, cfg: LlmConfig, base_url: str):
         self.cfg = cfg
-        self.client = httpx.Client(base_url=cfg.base_url.rstrip("/"), timeout=httpx.Timeout(10, read=300))
+        self.api = "ollama" if cfg.backend == "ollama" else "openai"
+        self.base_url = base_url.rstrip("/")
+        self.client = httpx.Client(base_url=self.base_url, timeout=httpx.Timeout(10, read=300))
         self.model = cfg.model or self._first_model()
         self.history: list[dict] = []
         self.last_used = 0.0
 
     def _first_model(self) -> str:
-        if self.cfg.api == "ollama":
+        if self.api == "ollama":
             names = [m["name"] for m in self.client.get("/api/tags").raise_for_status().json()["models"]]
         else:
             names = [m["id"] for m in self.client.get("/models").raise_for_status().json()["data"]]
         if not names:
-            raise RuntimeError(f"No models available on {self.cfg.base_url}")
-        log.info("No llm.model set, using %s", names[0])
+            raise RuntimeError(f"No models available on {self.base_url}")
+        if self.cfg.backend != "builtin":
+            log.info("No llm.model set, using %s", names[0])
         return names[0]
 
     def _ollama_options(self) -> dict:
@@ -38,13 +42,13 @@ class Chat:
     def warm_up(self) -> None:
         """Load the model into VRAM now rather than on the first question."""
         start = time.perf_counter()
-        if self.cfg.api == "ollama":
+        if self.api == "ollama":
             self.client.post("/api/generate", json={
                 "model": self.model, "keep_alive": self.cfg.keep_alive, "options": self._ollama_options(),
             }).raise_for_status()
         else:
             list(self._stream_openai([{"role": "user", "content": "hi"}], max_tokens=1))
-        log.info("LLM ready: %s (%.1fs)", self.model, time.perf_counter() - start)
+        log.info("LLM ready (%.1fs)", time.perf_counter() - start)
 
     def reply(self, text: str, cancelled: Callable[[], bool]) -> Iterator[str]:
         """Yield the reply in pieces as they're generated; stops early if cancelled() turns true."""
@@ -53,7 +57,7 @@ class Chat:
             self.history = []
         self.history = self.history[-2 * self.cfg.history_turns:] + [{"role": "user", "content": text}]
         messages = [{"role": "system", "content": self.cfg.system_prompt}] + self.history
-        stream = self._stream_ollama(messages) if self.cfg.api == "ollama" else self._stream_openai(messages)
+        stream = self._stream_ollama(messages) if self.api == "ollama" else self._stream_openai(messages)
         answer = []
         try:
             for piece in stream:
@@ -87,6 +91,8 @@ class Chat:
 
     def _stream_openai(self, messages: list[dict], **extra) -> Iterator[str]:
         body = {"model": self.model, "messages": messages, "stream": True, "temperature": self.cfg.temperature, **extra}
+        if self.cfg.backend == "builtin":
+            body["chat_template_kwargs"] = {"enable_thinking": self.cfg.think}
         with self.client.stream("POST", "/chat/completions", json=body) as r:
             r.raise_for_status()
             for line in r.iter_lines():

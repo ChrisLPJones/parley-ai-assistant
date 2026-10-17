@@ -1,37 +1,21 @@
 """Speech-to-text with faster-whisper (CTranslate2), GPU when available."""
-import importlib.util
 import logging
-import os
-import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
+from . import gpu
 from .config import SttConfig
 
 log = logging.getLogger(__name__)
 
 
-def _add_cuda_dll_dirs() -> None:
-    """Make the pip-installed cuBLAS/cuDNN DLLs findable so no CUDA toolkit install is needed."""
-    if sys.platform != "win32":
-        return
-    for pkg in ("nvidia.cublas", "nvidia.cudnn"):
-        try:
-            spec = importlib.util.find_spec(pkg)
-        except ModuleNotFoundError:
-            continue
-        for loc in (spec.submodule_search_locations or []) if spec else []:
-            bin_dir = os.path.join(loc, "bin")
-            if os.path.isdir(bin_dir):
-                os.add_dll_directory(bin_dir)
-                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
-
-
 class Transcriber:
-    def __init__(self, cfg: SttConfig):
+    def __init__(self, cfg: SttConfig, model_dir: Path):
         self.cfg = cfg
-        _add_cuda_dll_dirs()
+        self.model_dir = str(model_dir)
+        gpu.add_cuda_dll_dirs()
         from faster_whisper import WhisperModel
 
         start = time.perf_counter()
@@ -51,11 +35,12 @@ class Transcriber:
         from huggingface_hub.errors import LocalEntryNotFoundError
 
         try:
-            return WhisperModel(self.cfg.model, device=device, compute_type=compute_type, local_files_only=True)
+            return WhisperModel(self.cfg.model, device=device, compute_type=compute_type,
+                                download_root=self.model_dir, local_files_only=True)
         except LocalEntryNotFoundError:
             pass
-        log.info("Downloading speech model %s (first run only) ...", self.cfg.model)
-        return WhisperModel(self.cfg.model, device=device, compute_type=compute_type)
+        log.info("Downloading speech model %s, first run only ...", self.cfg.model)
+        return WhisperModel(self.cfg.model, device=device, compute_type=compute_type, download_root=self.model_dir)
 
     def _warm_up(self) -> None:
         # Runs the encoder once so CUDA kernels are loaded before the first real question

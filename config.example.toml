@@ -1,4 +1,4 @@
-# Parley settings. Copy to %APPDATA%\parley\config.toml. Every key is optional.
+# Parley settings. Copy to %LOCALAPPDATA%\parley\config.toml (or $PARLEY_HOME/config.toml). Every key is optional.
 
 [hotkey]
 # Hold to talk. pynput key names: pause, f13, scroll_lock, ctrl_r, insert, or a single character
@@ -18,20 +18,29 @@ language = "en"            # "" to auto-detect
 beam_size = 1
 
 [llm]
-api = "ollama"                       # ollama | openai
-base_url = "http://127.0.0.1:11434"  # for openai-style servers include /v1, e.g. http://127.0.0.1:8080/v1
-model = ""                           # "" = first installed model
+# builtin: Parley downloads and runs llama.cpp and a model itself (nothing else to install).
+# ollama / openai: use a server you already run instead.
+backend = "builtin"
+preset = "auto"            # auto picks by VRAM: xl (Qwen3.6 35B-A3B), large (Gemma 4 26B-A4B),
+                           # medium (Qwen3.5 9B), small (Qwen3.5 4B), tiny (Qwen3.5 2B)
+# model_repo = "unsloth/gemma-4-12b-it-GGUF"   # any GGUF on Hugging Face instead of a preset
+# model_file = "gemma-4-12b-it-Q4_K_M.gguf"
+# model_path = "D:/models/my-model.gguf"       # or a GGUF already on disk
+gpu_layers = 999
+num_ctx = 8192
 temperature = 0.7
-num_ctx = 8192                       # 0 = keep the server's setting (avoids reloading a shared model)
-keep_alive = "30m"
-think = false
+think = false              # reasoning models think before answering: smarter, much slower to start talking
 history_turns = 10
 reset_after_idle_s = 300
 # system_prompt = "You are Parley, ..."
+
+# For backend = "ollama" or "openai":
+# base_url = "http://127.0.0.1:11434"   # openai-style servers include /v1, e.g. http://127.0.0.1:1234/v1
+# model = ""                            # "" = first model the server reports
+# keep_alive = "30m"                    # ollama only
 
 [tts]
 voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
 speed = 1.1
 lang = "en-us"
 device = "auto"     # auto | cpu
-# model_dir = "D:/models/kokoro"

@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -45,13 +46,16 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"parley {__version__}")
     args = parser.parse_args()
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
     )
-    for noisy in ("httpx", "httpcore", "faster_whisper"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Libraries like huggingface_hub re-enable httpx request logging, so filter at the handler instead
+    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer")
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
 
     if args.list_devices:
         import sounddevice as sd

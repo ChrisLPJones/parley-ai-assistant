@@ -27,17 +27,34 @@ class Parley:
         self._sentences: queue.Queue[tuple[int, str | None, float]] = queue.Queue()
         self.finished = threading.Event()  # set once a turn's answer has been fully played
 
-        self.chat = Chat(cfg.llm)
-        llm_warm = threading.Thread(target=self.chat.warm_up, daemon=True)
-        llm_warm.start()  # loads into VRAM while the other models load
-        self.stt = Transcriber(cfg.stt) if use_mic else None
-        self.speaker = Speaker(cfg.tts, Path(cfg.tts.model_dir) if cfg.tts.model_dir else app_dir() / "models")
+        home = app_dir()
+        # The LLM loads into VRAM in the background while speech models load
+        llm_ready = threading.Thread(target=self._start_llm, args=(home,), daemon=True)
+        llm_ready.start()
+        self.stt = Transcriber(cfg.stt, home / "models" / "whisper") if use_mic else None
+        self.speaker = Speaker(cfg.tts, home / "models" / "kokoro")
         self.player = Player(cfg.audio.output_device, is_current=lambda t: t == self.turn)
         self.recorder = Recorder(cfg.audio.input_device, cfg.audio.preroll_ms) if use_mic else None
-        llm_warm.join()
+        llm_ready.join()
+        if self._llm_error:
+            raise self._llm_error
 
         threading.Thread(target=self._think_loop, daemon=True, name="think").start()
         threading.Thread(target=self._speak_loop, daemon=True, name="speak").start()
+
+    def _start_llm(self, home: Path) -> None:
+        self._llm_error = None
+        try:
+            llm = self.cfg.llm
+            if llm.backend == "builtin":
+                from . import llama_server
+                base_url = llama_server.start(llm, home)
+            else:
+                base_url = llm.base_url or "http://127.0.0.1:11434"
+            self.chat = Chat(llm, base_url)
+            self.chat.warm_up()
+        except Exception as e:
+            self._llm_error = e
 
     def is_current(self, turn: int) -> bool:
         return turn == self.turn
@@ -117,7 +134,9 @@ class Parley:
                 continue
             if not self.is_current(turn):
                 continue
+            t = time.perf_counter()
             audio = self.speaker.synth(sentence)
+            log.debug("tts %.0f ms (+%.0f ms since release): %s", (time.perf_counter() - t) * 1000, (time.perf_counter() - t0) * 1000, sentence)
             on_start = None
             if first:
                 first = False

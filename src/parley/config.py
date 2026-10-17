@@ -16,11 +16,14 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 def app_dir() -> Path:
+    """Where Parley keeps its config, downloaded runtime and models (several GB). PARLEY_HOME overrides."""
+    if os.environ.get("PARLEY_HOME"):
+        return Path(os.environ["PARLEY_HOME"])
     if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "parley"
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "parley"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "parley"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "parley"
 
 
 @dataclass
@@ -47,14 +50,21 @@ class SttConfig:
 
 @dataclass
 class LlmConfig:
-    api: str = "ollama"  # ollama | openai (llama.cpp server, LM Studio, vLLM, ...)
-    base_url: str = "http://127.0.0.1:11434"
-    model: str = ""  # "" = first model the server reports
+    # builtin: Parley downloads and runs llama.cpp itself (default, nothing to install).
+    # ollama / openai: use a server you already run (Ollama, LM Studio, vLLM, llama-server, ...)
+    backend: str = "builtin"
+    preset: str = "auto"  # builtin: auto (sized to your GPU) | xl | large | medium | small | tiny
+    model_repo: str = ""  # builtin: any GGUF on Hugging Face instead of a preset, e.g. "unsloth/Qwen3.5-9B-GGUF"
+    model_file: str = ""  #   ...and the file in that repo, e.g. "Qwen3.5-9B-Q4_K_M.gguf"
+    model_path: str = ""  # builtin: or a GGUF file already on disk
+    gpu_layers: int = 999  # builtin: layers offloaded to the GPU (999 = all)
+    base_url: str = ""  # ollama/openai: "" = http://127.0.0.1:11434 for ollama
+    model: str = ""  # ollama/openai: "" = first model the server reports
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     temperature: float = 0.7
-    num_ctx: int = 8192  # ollama only; 0 = keep whatever the server uses
+    num_ctx: int = 8192  # context window; for ollama 0 keeps whatever the server uses
     keep_alive: str = "30m"  # ollama only: how long the model stays loaded between questions
-    think: bool = False  # ollama only: allow reasoning models to think first (slower)
+    think: bool = False  # let reasoning models think before answering (much slower to start talking)
     history_turns: int = 10  # user/assistant exchanges remembered
     reset_after_idle_s: int = 300  # start a fresh conversation after this long with no question
 
@@ -65,7 +75,6 @@ class TtsConfig:
     speed: float = 1.1
     lang: str = "en-us"
     device: str = "auto"  # auto | cpu
-    model_dir: str = ""  # "" = <app dir>/models
 
 
 @dataclass

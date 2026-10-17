@@ -11,25 +11,47 @@ hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) �
 
 **Why it feels fast**
 
-- Every model is loaded and warmed up at startup, and the LLM is kept resident in VRAM.
+- Every model is loaded and warmed up at startup and stays resident in VRAM.
 - The mic stream is always open with a short pre-roll, so recording starts instantly and your first word isn't clipped.
 - The answer is spoken sentence by sentence while the LLM is still generating, so speech starts after the first sentence, not the whole reply.
 - Pressing the hotkey again interrupts the current answer immediately.
 
 ## Components
 
-| Stage | Default | Notes |
+Everything is downloaded by Parley itself on first run into its own folder. Nothing needs to be
+installed separately, and nothing already on the machine (Ollama, CUDA toolkit, model caches) is used.
+
+| Stage | What | Notes |
 |---|---|---|
 | Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) `large-v3-turbo` | CUDA float16; falls back to CPU int8 |
-| LLM | [Ollama](https://ollama.com) | Or any OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |
-| Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | Model files download on first run (~350 MB) |
+| LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on AMD/Intel, Metal on Mac |
+| LLM model | GGUF from Hugging Face, sized to your GPU | see presets below |
+| Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime, or CPU |
+
+CUDA libraries come from pip (`nvidia-*-cu12` wheels) and llama.cpp's own release, so only an
+NVIDIA driver is needed, not the CUDA toolkit.
+
+### LLM presets
+
+`preset = "auto"` picks the largest one that fits your VRAM alongside the speech models:
+
+| Preset | Model | Download | Fits |
+|---|---|---|---|
+| xl | Qwen3.6 35B-A3B (MoE, 3B active) | 22 GB | 28 GB+ VRAM |
+| large | Gemma 4 26B-A4B (MoE, 4B active) | 17 GB | 23 GB+ |
+| medium | Qwen3.5 9B | 5.7 GB | 11 GB+ |
+| small | Qwen3.5 4B | 2.7 GB | 8 GB+ |
+| tiny | Qwen3.5 2B | 1.3 GB | CPU / small GPUs |
+
+Any other GGUF works via `model_repo` + `model_file`, or `model_path` for a local file. If you
+already run Ollama, LM Studio or similar, `backend = "ollama"` / `"openai"` uses that instead.
 
 ## Requirements
 
-- Windows 10/11 (Linux should work, untested)
-- An NVIDIA GPU is strongly recommended. CPU works but speech recognition is much slower.
-- [Ollama](https://ollama.com) with at least one model pulled, e.g. `ollama pull qwen3:8b`
+- Windows 10/11 (Linux and macOS should work, untested)
+- An NVIDIA GPU is strongly recommended. Other GPUs run the LLM via Vulkan; speech runs on CPU.
 - [uv](https://docs.astral.sh/uv/)
+- Disk: about 3 GB for speech models and runtime, plus the LLM
 
 ## Run
 
@@ -39,9 +61,8 @@ cd parley
 uv run parley
 ```
 
-Hold **Pause** (default) and speak; release to send.
-
-Useful flags:
+The first run downloads everything (progress is shown); later starts take a few seconds and are fully offline.
+Hold **Pause** (default) and speak; release to send. Press it again while Parley is talking to interrupt.
 
 ```sh
 uv run parley --ask "what's the capital of Peru?"   # typed question, no mic
@@ -49,16 +70,19 @@ uv run parley --list-devices                        # pick mic/speakers for the 
 uv run parley -v                                    # debug logging with latency timings
 ```
 
-## Configuration
+## Files and configuration
 
-Copy `config.example.toml` to `%APPDATA%\parley\config.toml` (or pass `--config path`) and edit.
-Every setting is optional; see the example file for all of them.
+Parley keeps everything in `%LOCALAPPDATA%\parley` (`~/.local/share/parley` on Linux,
+`~/Library/Application Support/parley` on macOS), or `$PARLEY_HOME` if set:
 
-## Choosing a model
+```
+config.toml        your settings (copy config.example.toml; every key is optional)
+models/            whisper/, kokoro/, llm/
+runtime/           llama.cpp build
+logs/              llama-server.log
+```
 
-Latency is dominated by how fast the LLM produces its first sentence. Smaller models answer faster;
-reasoning ("thinking") models are fine as long as `think = false` (the default). With 24–32 GB of
-VRAM a ~27B model at Q4/Q5 leaves room for Whisper and Kokoro; with 8–12 GB use a 4–8B model.
+Delete the folder to uninstall completely.
 
 ## License
 
