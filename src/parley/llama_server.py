@@ -22,26 +22,22 @@ log = logging.getLogger(__name__)
 LLAMA_CPP_TAG = "b11702"
 RELEASE_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_TAG}/"
 
-# name: (Hugging Face repo, file, approx VRAM needed in GB incl. context). Chosen for fast first-token
-# latency at conversational quality; the MoE models only run ~3-4B parameters per token.
+# name: (Hugging Face repo, file, approx memory needed in GB incl. context). Kept small so Parley
+# runs on ordinary laptops; bigger GGUFs work via llm.model_repo / model_file.
 PRESETS = {
-    "xl": ("unsloth/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", 24),
-    "large": ("unsloth/gemma-4-26B-A4B-it-GGUF", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", 19),
-    "medium": ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf", 7),
     "small": ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf", 4),
     "tiny": ("unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-Q4_K_M.gguf", 2),
 }
-STT_TTS_VRAM_GB = 4  # Whisper large-v3-turbo + Kokoro + headroom
+SPEECH_VRAM_MB = 2048  # Whisper large-v3-turbo + Kokoro, loading alongside the LLM
 
 
 def pick_preset() -> str:
+    """small on a GPU with room for it (or Apple Silicon), otherwise tiny, which is fine on CPU."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "small"
     nv = gpu.nvidia()
-    if not nv:
-        return "small" if sys.platform == "darwin" else "tiny"
-    budget = nv.vram_mb / 1024 - STT_TTS_VRAM_GB
-    for name, (_, _, need) in PRESETS.items():
-        if need <= budget:
-            return name
+    if nv and (nv.vram_mb - SPEECH_VRAM_MB) / 1024 >= PRESETS["small"][2]:
+        return "small"
     return "tiny"
 
 
@@ -144,15 +140,20 @@ def _kill_with_parent(proc: subprocess.Popen) -> None:
     _kill_with_parent.job = job  # handle must stay open for Parley's lifetime
 
 
-def start(cfg: LlmConfig, home: Path) -> str:
-    """Start llama-server and wait until the model is loaded. Returns the OpenAI-style base URL."""
+def start(cfg: LlmConfig, home: Path) -> tuple[str, str]:
+    """Start llama-server and wait until the model is loaded. Returns (OpenAI-style base URL, model name)."""
     exe = ensure_runtime(home)
     model = ensure_model(cfg, home)
     port = _free_port()
     args = [
         str(exe), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
-        "--ctx-size", str(cfg.num_ctx), "--n-gpu-layers", str(cfg.gpu_layers), "--jinja", "--no-webui",
+        "--ctx-size", str(cfg.num_ctx), "--jinja", "--no-webui",
     ]
+    if cfg.gpu_layers >= 0:
+        args += ["--n-gpu-layers", str(cfg.gpu_layers)]
+    else:
+        # Offload as many layers as fit, leaving room for the speech models that load at the same time
+        args += ["--fit", "on", "--fit-target", str(SPEECH_VRAM_MB)]
     if not cfg.think:
         args += ["--reasoning-budget", "0"]
     log_path = home / "logs" / "llama-server.log"
@@ -176,4 +177,4 @@ def start(cfg: LlmConfig, home: Path) -> str:
             pass
         time.sleep(0.25)
     log.info("LLM server up: %s (%.1fs, log %s)", model.name, time.perf_counter() - start_time, log_path)
-    return url + "/v1"
+    return url + "/v1", model.stem

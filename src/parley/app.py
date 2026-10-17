@@ -10,7 +10,7 @@ import numpy as np
 
 from .audio import MIC_RATE, Player, Recorder, tone
 from .config import Config, app_dir
-from .llm import Chat
+from .llm import CLOUD_BACKENDS, create as create_chat
 from .stt import Transcriber
 from .tts import SentenceSplitter, Speaker
 
@@ -46,14 +46,16 @@ class Parley:
         self._llm_error = None
         try:
             llm = self.cfg.llm
+            base_url, local_model = None, "local"
             if llm.backend == "builtin":
                 from . import llama_server
-                base_url = llama_server.start(llm, home)
-            else:
-                base_url = llm.base_url or "http://127.0.0.1:11434"
-            self.chat = Chat(llm, base_url)
+                base_url, local_model = llama_server.start(llm, home)
+            elif llm.backend in CLOUD_BACKENDS:
+                log.info("Using %s: what you say is transcribed locally, then the text is sent to %s",
+                         CLOUD_BACKENDS[llm.backend], CLOUD_BACKENDS[llm.backend])
+            self.chat = create_chat(llm, base_url, local_model)
             self.chat.warm_up()
-        except Exception as e:
+        except BaseException as e:  # incl. SystemExit for config errors, re-raised on the main thread
             self._llm_error = e
 
     def is_current(self, turn: int) -> bool:

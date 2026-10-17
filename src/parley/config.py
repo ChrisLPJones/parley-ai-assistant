@@ -41,7 +41,9 @@ class AudioConfig:
 
 @dataclass
 class SttConfig:
-    model: str = "large-v3-turbo"  # any faster-whisper model name or local path
+    # auto = large-v3-turbo on an NVIDIA GPU, small.en on CPU (fast enough for laptops);
+    # or any faster-whisper model name: tiny / base / small / medium / large-v3-turbo / distil-large-v3
+    model: str = "auto"
     device: str = "auto"  # auto | cuda | cpu
     compute_type: str = "default"  # default | float16 | int8_float16 | int8
     language: str = "en"  # "" = auto-detect
@@ -50,16 +52,20 @@ class SttConfig:
 
 @dataclass
 class LlmConfig:
-    # builtin: Parley downloads and runs llama.cpp itself (default, nothing to install).
-    # ollama / openai: use a server you already run (Ollama, LM Studio, vLLM, llama-server, ...)
+    # builtin:   Parley downloads and runs a small local model itself (default, works offline)
+    # anthropic: Claude via the Anthropic API (needs ANTHROPIC_API_KEY or api_key)
+    # openai:    OpenAI API (needs OPENAI_API_KEY or api_key)
+    # ollama / server: a local server you already run (Ollama / any OpenAI-compatible server)
     backend: str = "builtin"
-    preset: str = "auto"  # builtin: auto (sized to your GPU) | xl | large | medium | small | tiny
+    preset: str = "auto"  # builtin: auto (picked from your hardware) | small (Qwen3.5 4B) | tiny (Qwen3.5 2B)
     model_repo: str = ""  # builtin: any GGUF on Hugging Face instead of a preset, e.g. "unsloth/Qwen3.5-9B-GGUF"
     model_file: str = ""  #   ...and the file in that repo, e.g. "Qwen3.5-9B-Q4_K_M.gguf"
     model_path: str = ""  # builtin: or a GGUF file already on disk
-    gpu_layers: int = 999  # builtin: layers offloaded to the GPU (999 = all)
-    base_url: str = ""  # ollama/openai: "" = http://127.0.0.1:11434 for ollama
-    model: str = ""  # ollama/openai: "" = first model the server reports
+    gpu_layers: int = -1  # builtin: layers on the GPU; -1 = fit automatically to free memory
+    model: str = ""  # anthropic: default claude-opus-5-5; openai: default chat-latest; ollama/server: "" = first available
+    api_key: str = ""  # anthropic/openai; leave empty to use the ANTHROPIC_API_KEY / OPENAI_API_KEY env var
+    effort: str = "low"  # anthropic: low | medium | high; low answers fastest
+    base_url: str = ""  # openai/ollama/server: override the endpoint
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     temperature: float = 0.7
     num_ctx: int = 8192  # context window; for ollama 0 keeps whatever the server uses

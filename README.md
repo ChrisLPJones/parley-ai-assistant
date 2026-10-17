@@ -18,40 +18,42 @@ hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) �
 
 ## Components
 
-Everything is downloaded by Parley itself on first run into its own folder. Nothing needs to be
-installed separately, and nothing already on the machine (Ollama, CUDA toolkit, model caches) is used.
+Everything runs locally by default and is downloaded by Parley itself on first run into its own
+folder. Nothing needs to be installed separately, and nothing already on the machine (Ollama, CUDA
+toolkit, model caches) is used.
 
 | Stage | What | Notes |
 |---|---|---|
-| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) `large-v3-turbo` | CUDA float16; falls back to CPU int8 |
+| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU |
 | LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on AMD/Intel, Metal on Mac |
-| LLM model | GGUF from Hugging Face, sized to your GPU | see presets below |
+| LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise |
 | Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime, or CPU |
 
-CUDA libraries come from pip (`nvidia-*-cu12` wheels) and llama.cpp's own release, so only an
-NVIDIA driver is needed, not the CUDA toolkit.
+The local models are deliberately small so Parley runs on ordinary laptops. CUDA libraries come
+from pip and llama.cpp's own release, so only a graphics driver is needed.
 
-### LLM presets
+### Using Claude or OpenAI instead
 
-`preset = "auto"` picks the largest one that fits your VRAM alongside the speech models:
+For smarter answers, the LLM step can use a cloud API while speech recognition and the voice stay
+local. Only the transcribed text of your question is sent.
 
-| Preset | Model | Download | Fits |
-|---|---|---|---|
-| xl | Qwen3.6 35B-A3B (MoE, 3B active) | 22 GB | 28 GB+ VRAM |
-| large | Gemma 4 26B-A4B (MoE, 4B active) | 17 GB | 23 GB+ |
-| medium | Qwen3.5 9B | 5.7 GB | 11 GB+ |
-| small | Qwen3.5 4B | 2.7 GB | 8 GB+ |
-| tiny | Qwen3.5 2B | 1.3 GB | CPU / small GPUs |
+```toml
+# %LOCALAPPDATA%\parley\config.toml
+[llm]
+backend = "anthropic"   # or "openai"
+```
 
-Any other GGUF works via `model_repo` + `model_file`, or `model_path` for a local file. If you
-already run Ollama, LM Studio or similar, `backend = "ollama"` / `"openai"` uses that instead.
+Then set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment (or `api_key` in the config).
+Defaults are `claude-opus-5-5` (at low effort for quick replies) and OpenAI's `chat-latest`;
+change either with `model`. Any other GGUF works locally via `model_repo` + `model_file`, and
+`backend = "ollama"` / `"server"` uses a local server you already run.
 
 ## Requirements
 
 - Windows 10/11 (Linux and macOS should work, untested)
-- An NVIDIA GPU is strongly recommended. Other GPUs run the LLM via Vulkan; speech runs on CPU.
+- Runs on CPU-only laptops; an NVIDIA GPU makes speech recognition more accurate and everything faster.
 - [uv](https://docs.astral.sh/uv/)
-- Disk: about 3 GB for speech models and runtime, plus the LLM
+- Disk: about 2-5 GB depending on hardware
 
 ## Run
 

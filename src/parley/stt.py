@@ -16,31 +16,45 @@ class Transcriber:
         self.cfg = cfg
         self.model_dir = str(model_dir)
         gpu.add_cuda_dll_dirs()
+        import ctranslate2
         from faster_whisper import WhisperModel
 
         start = time.perf_counter()
-        try:
-            self.model = self._load(WhisperModel, cfg.device, cfg.compute_type)
+        self.model = None
+        if cfg.device == "cuda" or (cfg.device == "auto" and ctranslate2.get_cuda_device_count() > 0):
+            try:
+                self.name = self._model_name(gpu=True)
+                self.model = self._load(WhisperModel, self.name, "cuda", cfg.compute_type)
+                self._warm_up()
+                where = "GPU"
+            except Exception as e:
+                log.warning("Whisper on GPU failed (%s); using the CPU instead", e)
+                self.model = None
+        if self.model is None:
+            self.name = self._model_name(gpu=False)
+            self.model = self._load(WhisperModel, self.name, "cpu", "int8")
             self._warm_up()
-        except Exception as e:
-            if cfg.device == "cpu":
-                raise
-            log.warning("Whisper on GPU failed (%s); falling back to CPU, which is much slower", e)
-            self.model = self._load(WhisperModel, "cpu", "int8")
-            self._warm_up()
-        log.info("Speech recognition ready: %s (%.1fs)", cfg.model, time.perf_counter() - start)
+            where = "CPU"
+        log.info("Speech recognition ready: %s on %s (%.1fs)", self.name, where, time.perf_counter() - start)
 
-    def _load(self, WhisperModel, device: str, compute_type: str):
+    def _model_name(self, gpu: bool) -> str:
+        if self.cfg.model != "auto":
+            return self.cfg.model
+        if gpu:
+            return "large-v3-turbo"
+        return "small.en" if self.cfg.language == "en" else "small"  # ~1s per question on a laptop CPU
+
+    def _load(self, WhisperModel, name: str, device: str, compute_type: str):
         # Stay offline once the model is cached; only the first run downloads it
         from huggingface_hub.errors import LocalEntryNotFoundError
 
         try:
-            return WhisperModel(self.cfg.model, device=device, compute_type=compute_type,
+            return WhisperModel(name, device=device, compute_type=compute_type,
                                 download_root=self.model_dir, local_files_only=True)
         except LocalEntryNotFoundError:
             pass
-        log.info("Downloading speech model %s, first run only ...", self.cfg.model)
-        return WhisperModel(self.cfg.model, device=device, compute_type=compute_type, download_root=self.model_dir)
+        log.info("Downloading speech model %s, first run only ...", name)
+        return WhisperModel(name, device=device, compute_type=compute_type, download_root=self.model_dir)
 
     def _warm_up(self) -> None:
         # Runs the encoder once so CUDA kernels are loaded before the first real question
