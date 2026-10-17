@@ -1,8 +1,9 @@
 # Parley
 
 A push-to-talk voice assistant that runs on your own machine. Hold a key, talk, let go, and a
-local LLM answers out loud. By default there are no cloud services and no accounts, and nothing
-leaves your PC.
+local LLM answers out loud. By default speech recognition, the LLM and the voice all run on your
+PC, with no accounts. Only web search and page fetches go online (see
+[Cloud backends and privacy](#cloud-backends-and-privacy)).
 
 ```
 hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) ──► Kokoro TTS ──► speakers
@@ -15,13 +16,13 @@ hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) �
 - Every model is loaded and warmed up at startup and stays resident (in VRAM when there is an NVIDIA GPU).
 - The mic stream is always open with a short pre-roll, so recording starts instantly and your first word isn't clipped.
 - The answer is spoken sentence by sentence while the LLM is still generating, so speech starts after the first sentence, not the whole reply.
-- Pressing the hotkey again interrupts the current answer immediately.
+- Pressing the hotkey again interrupts the current answer immediately and starts a new recording.
 
 Status: version 0.1.0, early. Windows 10/11 is the only tested platform.
 
 ## Using it
 
-1. Start Parley (see [Install and run](#install-and-run-windows)) and wait for it to say it is ready.
+1. Start Parley (see [Install and run](#install-and-run-windows)) and wait for the console to show "Ready. Hold [pause] and speak; release to send. Ctrl+C to quit."
 2. Hold **Pause** (the default hotkey), speak, and release to send.
 3. Press the hotkey again while Parley is talking to interrupt it.
 
@@ -41,9 +42,11 @@ and Start menu apps, never scripts or programs by path. Files that may hold secr
 
 ### Cloud backends and privacy
 
-By default everything runs locally. For smarter answers, the LLM step can use the Anthropic or
+By default speech recognition, the LLM and the voice run locally. Only web search (DuckDuckGo) and
+page fetches go online; they are on by default and `web_search = false` under `[tools]` turns them
+off. Models are downloaded on first run. For smarter answers, the LLM step can use the Anthropic or
 OpenAI API while speech recognition and the voice stay local. With a cloud backend, **only the
-transcribed text leaves your machine** (never audio), plus anything a tool reads for the
+transcribed text and tool output leave your machine** (never audio), including anything a tool reads for the
 conversation, such as the contents of a file you asked about.
 
 ```toml
@@ -109,13 +112,13 @@ Expect problems:
 
 ## Components
 
-Everything runs locally by default and is downloaded by Parley itself on first run into its own
-folder. Nothing needs to be installed separately, and nothing already on the machine (Ollama, CUDA
+Speech, LLM and voice run locally by default. Parley downloads the models itself on first run into
+its own folder. Nothing needs to be installed separately, and nothing already on the machine (Ollama, CUDA
 toolkit, model caches) is used.
 
 | Stage | What | Notes |
 |---|---|---|
-| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU (AMD and Intel GPUs can't run it, so the CPU does) |
+| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU when language is "en", otherwise `small` (AMD and Intel GPUs can't run it, so the CPU does) |
 | LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on a discrete AMD/Intel GPU, CPU otherwise, Metal on Mac |
 | LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise |
 | Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime on NVIDIA, otherwise CPU (already faster than real time) |
@@ -157,7 +160,7 @@ runtime/           llama.cpp build
 logs/              llama-server.log
 ```
 
-Delete the folder to uninstall completely. Key settings (all in `config.example.toml`):
+To remove everything, delete this folder and the cloned repo. Key settings (all in `config.example.toml`):
 
 | Section | Key | Meaning |
 |---|---|---|
