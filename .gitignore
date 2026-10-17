@@ -7,3 +7,4 @@ dist/
 *.onnx
 *.bin
 *.part
+src/parley/_build.py
