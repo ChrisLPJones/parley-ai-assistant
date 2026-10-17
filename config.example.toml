@@ -58,3 +58,6 @@ voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/V
 speed = 1.1
 lang = "en-us"
 device = "auto"     # auto (CUDA on NVIDIA, else CPU) | cuda | cpu
+
+[updates]
+check = true        # installed copies only: look for a newer Parley after startup and ask before installing (source checkouts never update)

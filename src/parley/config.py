@@ -96,6 +96,13 @@ class TtsConfig:
 
 
 @dataclass
+class UpdatesConfig:
+    # Installed (packaged) copies only: look for a newer version after startup and ask before installing it.
+    # A source checkout never updates itself. The update server is fixed at build time and cannot be set here.
+    check: bool = True
+
+
+@dataclass
 class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -103,6 +110,7 @@ class Config:
     llm: LlmConfig = field(default_factory=LlmConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    updates: UpdatesConfig = field(default_factory=UpdatesConfig)
 
 
 def _apply(obj, data: dict, where: str) -> None:
