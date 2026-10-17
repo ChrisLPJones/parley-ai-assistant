@@ -23,6 +23,7 @@ dependencies = [
     # 1.25+ is built for CUDA 13, whose cuDNN wheel would clash with CTranslate2's CUDA 12 one.
     "onnxruntime-gpu>=1.22,<1.25; sys_platform == 'win32' or sys_platform == 'linux'",
     "anthropic>=0.70",
+    "tomlkit>=0.13",  # config.toml read-modify-write that keeps the user's comments (settings window)
 ]
 
 [tool.uv]

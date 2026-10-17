@@ -3,6 +3,7 @@ as a child process that dies with Parley."""
 import atexit
 import logging
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -158,18 +159,39 @@ def ensure_runtime(home: Path, runtime: str, open_stream=None) -> Path:
     return exe
 
 
+MODEL_REPO_RE = re.compile(r"[\w.-]+/[\w.-]+", re.ASCII)
+MODEL_FILE_RE = re.compile(r"[\w.-]+\.gguf", re.ASCII)
+_WIN_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))})
+
+
+def check_model_names(repo: str, file: str) -> None:
+    """Raise ValueError unless repo and file are plain names: the file becomes a path under models/llm and the
+    repo part of a Hugging Face URL, so no separators, drive letters, '..' or Windows device names."""
+    if not MODEL_REPO_RE.fullmatch(repo) or any(p in (".", "..") for p in repo.split("/")):
+        raise ValueError("a Hugging Face repo looks like owner/name (letters, digits, '.', '_' and '-' only)")
+    if not MODEL_FILE_RE.fullmatch(file) or file.split(".")[0].lower() in _WIN_DEVICES:
+        raise ValueError("a model file is a plain name ending in .gguf (letters, digits, '.', '_' and '-' only)")
+
+
 def ensure_model(cfg: LlmConfig, home: Path) -> Path:
     if cfg.model_path:
         return Path(cfg.model_path)
     if cfg.model_repo:
         repo, file = cfg.model_repo, cfg.model_file
+        try:
+            check_model_names(repo, file)
+        except ValueError as e:
+            raise SystemExit(f"Invalid llm.model_repo / llm.model_file: {e}.") from e
     else:
         preset = cfg.preset if cfg.preset != "auto" else pick_preset()
         if preset not in PRESETS:
             raise SystemExit(f"Unknown llm.preset {preset!r}; choose auto or one of {', '.join(PRESETS)}")
         repo, file, _ = PRESETS[preset]
         log.info("LLM preset: %s (%s)", preset, file)
-    dest = home / "models" / "llm" / file
+    base = home / "models" / "llm"
+    dest = base / file
+    if not dest.resolve().is_relative_to(base.resolve()):
+        raise SystemExit("llm.model_file must stay inside the models folder.")
     if not dest.exists():
         log.info("Downloading %s from %s, first run only ...", file, repo)
         download(f"https://huggingface.co/{repo}/resolve/main/{file}", dest)
