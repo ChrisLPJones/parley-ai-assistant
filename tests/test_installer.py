@@ -3,6 +3,7 @@
 The compile test runs the real ISCC on a tiny fake tree and is skipped when Inno Setup is not installed.
 """
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -53,6 +54,19 @@ class Helpers(unittest.TestCase):
         exe.write_bytes(b"")
         self.assertEqual(mk.find_iscc({"PATH": "", "LOCALAPPDATA": str(self.root)}), exe)
 
+    def test_find_iscc_ignores_cwd_on_path(self):
+        fake = self.root / "ISCC.exe"
+        fake.write_bytes(b"")
+        env = {"PATH": str(self.root), "LOCALAPPDATA": str(self.root / "none")}
+        self.assertEqual(mk.find_iscc(env), fake)
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with self.assertRaises(mk.InstallerError):
+                mk.find_iscc(env)
+        finally:
+            os.chdir(old)
+
     def test_args_carry_version_and_paths(self):
         args = mk.iscc_args(Path("ISCC.exe"), "1.2.3", Path("src dir"), Path("out"), Path("x.iss"))
         self.assertIn("/DAppVersion=1.2.3", args)
@@ -82,6 +96,13 @@ class Script(unittest.TestCase):
                        "AppVersion={#AppVersion}", "OutputBaseFilename=Parley-Setup-{#AppVersion}",
                        "Compression=lzma2/max", "SolidCompression=yes", "skipifsilent", "ConfirmUninstall"):
             self.assertIn(needle, ISS)
+
+    def test_no_bare_app_uninstall_delete(self):
+        # a user may install into a folder that holds other files: only Parley's own paths may be deleted
+        rows = [ln for ln in ISS.split("[UninstallDelete]")[1].split("[Icons]")[0].splitlines() if ln.startswith("Type:")]
+        self.assertTrue(rows)
+        for ln in rows:
+            self.assertNotIn('Name: "{app}"', ln)
 
     def test_signtool_hook_is_commented_out(self):
         lines = [ln for ln in ISS.splitlines() if "SignTool" in ln]

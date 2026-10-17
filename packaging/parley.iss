@@ -43,6 +43,8 @@ UninstallDisplayName=Parley
 UninstallDisplayIcon={app}\Parley.exe
 ; Close a running Parley (the launcher or the app) before replacing files, so an upgrade does not hit locked files.
 CloseApplications=yes
+; ... and do not relaunch it afterwards (a scripted silent upgrade must not start the app).
+RestartApplications=no
 ; The install dir keeps Inno's default per-user ACLs (inherited from %LOCALAPPDATA%\Programs: not writable by
 ; other standard users). Nothing here widens them. The in-app updater later calls install.harden_dir() on the
 ; install root and app\, which only removes inherited entries and keeps this user, SYSTEM and Administrators.
@@ -71,8 +73,12 @@ Type: files; Name: "{app}\current.json.prev"
 Type: files; Name: "{app}\current.json.tmp"
 
 [UninstallDelete]
-; The in-app updater adds app\<newer>\ trees and Parley.exe.old that Inno does not know about.
-Type: filesandordirs; Name: "{app}"
+; Only what Parley itself creates and Inno does not track: app\<newer>\ trees from the in-app updater, the pointer
+; and its backups/temp files, a replaced launcher (Parley.exe.old). Never the bare {app}: the user may have chosen a
+; folder that holds other files. Inno removes {app} itself once it is empty.
+Type: filesandordirs; Name: "{app}\app"
+Type: files; Name: "{app}\current.json*"
+Type: files; Name: "{app}\Parley.exe.*"
 
 [Icons]
 ; Console launcher for now; a windowed/tray launcher belongs to the later tray-app item.
@@ -123,15 +129,39 @@ var
   P, Q: Integer;
   T: String;
 begin
+  { Missing or corrupt current.json: return '' and the install proceeds (the launcher repairs the pointer). }
   Result := '';
   if not LoadStringFromFile(AddBackslash(Dir) + 'current.json', S) then Exit;
   T := S;
-  P := Pos('"version": "', T);
+  P := Pos('"version"', T);
   if P = 0 then Exit;
-  T := Copy(T, P + 12, 32);
+  T := Copy(T, P + 9, 48);
+  { whitespace-tolerant: "version" : "x" and compact "version":"x" }
+  T := TrimLeft(T);
+  if (T = '') or (T[1] <> ':') then Exit;
+  T := TrimLeft(Copy(T, 2, Length(T)));
+  if (T = '') or (T[1] <> '"') then Exit;
+  T := Copy(T, 2, 32);
   Q := Pos('"', T);
   if Q = 0 then Exit;
   Result := Copy(T, 1, Q - 1);
+end;
+
+{ The in-app updater hardlinks unchanged files into a new tree and makes them read-only; the hardlink shares the
+  attribute, so the older tree's files become read-only too and Inno's own file deletion fails on them (error 5).
+  Clear the attribute under the install dir's app folder before anything is deleted (upgrade) or uninstalled. }
+procedure ClearReadOnly(Dir: String);
+var
+  Code: Integer;
+begin
+  if DirExists(Dir) then
+    Exec(ExpandConstant('{sys}\attrib.exe'), '-R "' + AddBackslash(Dir) + '*" /S /D', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    ClearReadOnly(ExpandConstant('{app}\app'));
 end;
 
 { Refuse to replace a newer install (for example one the in-app updater moved forward) with this older installer. }
@@ -142,5 +172,7 @@ begin
   Result := '';
   Have := InstalledVersion(ExpandConstant('{app}'));
   if (Have <> '') and (CompareVersions(Have, '{#AppVersion}') > 0) then
-    Result := 'Parley ' + Have + ' is already installed here and is newer than this installer ({#AppVersion}). Nothing was changed.';
+    Result := 'Parley ' + Have + ' is already installed here and is newer than this installer ({#AppVersion}). Nothing was changed.'
+  else
+    ClearReadOnly(ExpandConstant('{app}\app'));
 end;

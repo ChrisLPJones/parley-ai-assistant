@@ -11,7 +11,6 @@ machine-wide Inno Setup 6 folders. The installer is not signed (see the SignTool
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -32,18 +31,23 @@ class InstallerError(Exception):
 
 
 def find_iscc(env: dict[str, str] | None = None) -> Path:
-    """ISCC.exe from PATH, else the per-user (`%LOCALAPPDATA%\\Programs`) or machine-wide Inno Setup 6 folder."""
+    """ISCC.exe: the `ISCC` env var, the per-user (`%LOCALAPPDATA%\\Programs`) or machine-wide Inno Setup 6 folder, then
+    PATH (entries equal to the current directory are ignored: a planted ISCC.exe there must not run)."""
     env = os.environ if env is None else env
-    on_path = shutil.which("ISCC", path=env.get("PATH"))
-    if on_path:
-        return Path(on_path)
+    explicit = env.get("ISCC")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
     for var, sub in (("LOCALAPPDATA", "Programs"), ("ProgramFiles(x86)", ""), ("ProgramFiles", "")):
         base = env.get(var)
         if base:
             cand = Path(base, sub, "Inno Setup 6", "ISCC.exe")
             if cand.is_file():
                 return cand
-    raise InstallerError("Inno Setup 6 (ISCC.exe) not found: install it (winget install JRSoftware.InnoSetup) or put it on PATH")
+    cwd = Path.cwd().resolve()
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        if d and Path(d).resolve() != cwd and (Path(d) / "ISCC.exe").is_file():
+            return Path(d, "ISCC.exe")
+    raise InstallerError("Inno Setup 6 (ISCC.exe) not found: install it (winget install JRSoftware.InnoSetup) or set ISCC to its path")
 
 
 def check_source(source: Path, version: str) -> None:
