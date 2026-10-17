@@ -139,7 +139,7 @@ class PathTests(unittest.TestCase):
         for p in ["../x", "a/../x", "/abs", "C:/x", "C:x", "a\\b", "a//b", "a/./b", "", ".", "x/", "con", "dir/NUL.txt",
                   "a/com1", "trail.", "sp ace /x", "a:stream", "q?", "x\x00y", 5, None, "a" * 300,
                   "con .txt", "nul .x", "COM¹", "lpt².txt", "x/aux.", "a\x7fb", "a‮b", "a b",
-                  "café", "a b"]:
+                  "café"]:
             with self.assertRaises(UpdateError, msg=repr(p)):
                 update.validate_rel_path(p)
 

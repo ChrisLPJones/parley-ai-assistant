@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -33,6 +34,9 @@ MAX_FILE_BYTES = 2 * 1024**3
 MAX_TOTAL_BYTES = 4 * 1024**3
 MAX_NOTES = 4000
 MAX_REDIRECTS = 3
+MAX_DOWNLOAD_SECONDS = 3600.0  # overall deadline per response; the 30 s read timeout is per read and a trickle beats it
+MIN_RATE = 16 * 1024  # bytes/s; after RATE_GRACE seconds a slower average aborts the download
+RATE_GRACE = 20.0
 TIMEOUT = httpx.Timeout(10.0, read=30.0)
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", re.ASCII)
@@ -182,7 +186,8 @@ def _load_json(raw: bytes) -> dict:
 
 def _platform_entry(src: dict, version: str) -> PlatformEntry:
     name = src.get("file")
-    if not isinstance(name, str) or not _FILE_NAME.fullmatch(name)             or not name.lower().endswith(".exe") or _is_reserved(name):
+    if (not isinstance(name, str) or not _FILE_NAME.fullmatch(name) or not name.lower().endswith(".exe")
+            or _is_reserved(name)):
         raise UpdateError("bad file name")
     index, index_sha = src.get("index"), src.get("index_sha256")
     if index is not None:
@@ -257,6 +262,26 @@ def updater_from_build(state_path: Path) -> "Updater | None":
 
 # ---------- client ----------
 
+class _Paced:
+    """Wraps a response so reading it enforces an overall deadline and a minimum average rate."""
+
+    def __init__(self, r: httpx.Response) -> None:
+        self._r = r
+        self.headers = r.headers
+        self._start = time.monotonic()
+
+    def iter_bytes(self, chunk_size: int | None = None):
+        got = 0
+        for chunk in self._r.iter_bytes(chunk_size):
+            got += len(chunk)
+            elapsed = time.monotonic() - self._start
+            if elapsed > MAX_DOWNLOAD_SECONDS:
+                raise UpdateError("download took too long")
+            if elapsed > RATE_GRACE and got / max(elapsed, 1e-9) < MIN_RATE:
+                raise UpdateError("download too slow")
+            yield chunk
+
+
 class Updater:
     """Checks one feed. `_allow_http_localhost` is a test hook only; never set it from config or env."""
 
@@ -306,7 +331,7 @@ class Updater:
                     continue
                 try:
                     r.raise_for_status()
-                    yield r
+                    yield _Paced(r)
                 finally:
                     r.close()
                 return
