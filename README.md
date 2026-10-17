@@ -91,7 +91,20 @@ uv run parley -v                                    # debug logging with latency
 ## Build
 
 There is no compile step: Parley is a Python package (3.11 to 3.13) run with uv. `uv build`
-produces a wheel using hatchling. A standalone installer is not built yet.
+produces a wheel using hatchling.
+
+A standalone Windows copy (no Python needed) is built with PyInstaller, which is a build-only
+dependency group (never installed for normal use):
+
+```
+uv run --group build python scripts/build.py
+```
+
+It writes `dist\install\` (about 620 MB, CPU path; the NVIDIA CUDA libraries are not bundled yet):
+`Parley.exe` (a small launcher), `current.json` and `app\<version>\parley-app.exe` with its libraries.
+Run `dist\install\Parley.exe`, or `parley-app.exe --self-check` to test the build. `--feed-url URL` bakes in
+an update server (default: none, so the built copy never checks for updates). `dist\` and `build\` are
+not committed. Release builds must be made in a clean environment (no CUDA toolkit on `PATH`). A packaged installer (`Parley-Setup.exe`) is not built yet.
 
 ## Linux (experimental, untested)
 
