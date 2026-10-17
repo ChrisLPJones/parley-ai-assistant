@@ -8,55 +8,20 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, config, credstore
+from . import __version__, config, credstore, hotkey, logsetup, tray_mode
 
 log = logging.getLogger(__name__)
 
 
-def _parse_key(name: str):
-    from pynput import keyboard
-
-    name = name.strip().lower()
-    if hasattr(keyboard.Key, name):
-        return getattr(keyboard.Key, name)
-    if len(name) == 1:
-        return keyboard.KeyCode.from_char(name)
-    raise SystemExit(f"Unknown hotkey {name!r}. Use a pynput key name like pause, f13, scroll_lock, ctrl_r.")
+_parse_key = hotkey.parse_key  # kept for callers and tests that import it from here
 
 
 def run_hotkey_loop(app, key_name: str, on_ready=None, stop: threading.Event | None = None) -> None:
-    from pynput import keyboard
-
-    key = _parse_key(key_name)
-    vk = getattr(getattr(key, "value", key), "vk", None)
-    listener = None
-
-    def on_press(k):
-        if k == key:
-            app.begin_listening()
-
-    def on_release(k):
-        if k == key:
-            app.end_listening()
-
-    def win32_filter(msg, data):
-        # Swallow the hotkey so no other app reacts to it. Without this, Pause in a focused
-        # console window freezes that console until another key is pressed.
-        if vk is None or data.vkCode != vk:
-            return True
-        if msg in (0x100, 0x104):  # WM_KEYDOWN, WM_SYSKEYDOWN
-            app.begin_listening()
-        elif msg in (0x101, 0x105):  # WM_KEYUP, WM_SYSKEYUP
-            app.end_listening()
-        listener.suppress_event()
-
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release, win32_event_filter=win32_filter)
-    with listener:
+    with hotkey.HotkeyListener(app, key_name) as hl:
         logging.info("Ready. Hold [%s] and speak; release to send. Ctrl+C to quit.", key_name)
         if on_ready:
             on_ready()
-        while listener.is_alive() and not (stop and stop.is_set()):
-            listener.join(0.5)  # short joins keep Ctrl+C responsive on Windows
+        hl.wait(stop)  # short joins keep Ctrl+C responsive on Windows
 
 
 def _disable_console_quick_edit() -> None:
@@ -144,6 +109,7 @@ def create_update_flow(app, cfg):
 
 
 def main() -> None:
+    logsetup.install_stdio_shim()  # a windowed process has no stdout/stderr: before argparse, tqdm and download touch them
     parser = argparse.ArgumentParser(prog="parley", description="Local push-to-talk voice assistant.")
     parser.add_argument("--config", type=Path, help=f"config file (default: {config.default_config_path()})")
     parser.add_argument("--ask", metavar="TEXT", help="ask one typed question, speak the answer, and exit")
@@ -157,26 +123,29 @@ def main() -> None:
     parser.add_argument("--delete-key", metavar="BACKEND", choices=keys, help="delete a saved API key, then exit")
     parser.add_argument("--key-status", action="store_true",
                         help="show whether a key is saved per backend and which source is in use (never the key), then exit")
+    parser.add_argument("--tray", action="store_true",
+                        help="run as a notification-area app (Windows) instead of the console loop")
+    parser.add_argument("--restarted", action="store_true", help=argparse.SUPPRESS)  # set by an update restart
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"parley {__version__}")
     args = parser.parse_args()
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
-    if args.verbose:
-        logging.getLogger("parley").setLevel(logging.DEBUG)  # Parley's own timings, not every library's
-    # Libraries like huggingface_hub re-enable httpx request logging, so filter at the handler instead
-    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer", "ddgs", "primp", "anthropic", "openai")
-    root = logging.getLogger()
-    for handler in root.handlers:
-        handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
-        handler.addFilter(credstore.RedactFilter())  # last line of defence: scrubs anything shaped like a key
-    # Write log lines from a background thread: if the console stops accepting output (text
-    # selected, Pause pressed), only logging waits, never listening, thinking or speaking
-    log_queue: queue.Queue = queue.Queue()
-    logging.handlers.QueueListener(log_queue, *root.handlers, respect_handler_level=True).start()
-    root.handlers = [logging.handlers.QueueHandler(log_queue)]
-    _disable_console_quick_edit()
+    tray_mode_on = args.tray or tray_mode.implied()
+    if tray_mode_on:
+        # no console: log to <home>/logs/parley.log (and to a real stderr when run from a terminal)
+        console = sys.stderr if not isinstance(sys.stderr, logsetup.LogStream) else None
+        file_listener = logsetup.setup_file_logging(config.app_dir(), verbose=args.verbose, console=console)
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+        if args.verbose:
+            logging.getLogger("parley").setLevel(logging.DEBUG)  # Parley's own timings, not every library's
+        root = logging.getLogger()
+        logsetup.harden(root.handlers)
+        # Write log lines from a background thread: if the console stops accepting output (text
+        # selected, Pause pressed), only logging waits, never listening, thinking or speaking
+        logsetup.start_queue(list(root.handlers))
+        _disable_console_quick_edit()
 
     if args.self_check:
         return self_check(args.config)
@@ -189,6 +158,11 @@ def main() -> None:
         return credstore.cli_set_key(args.set_key)
     if args.delete_key:
         return credstore.cli_delete_key(args.delete_key)
+    if tray_mode_on:
+        try:
+            return tray_mode.run(args, create_update_flow)  # config errors surface in the tray, not as a crash
+        finally:
+            file_listener.stop()  # flush the queued log lines before the process ends
     # Move a plaintext llm.api_key out of config.toml before the config is read (never raises)
     credstore.migrate_legacy_key(args.config or config.default_config_path())
     cfg = config.load(args.config)

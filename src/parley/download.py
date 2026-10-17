@@ -5,8 +5,10 @@ import re
 import stat
 import sys
 import tarfile
+import threading
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -14,9 +16,35 @@ import httpx
 log = logging.getLogger(__name__)
 
 
-def download(url: str, dest: Path) -> Path:
+class DownloadCancelled(Exception):
+    """The caller set the `cancel` event; the `.part` file is kept so a later call resumes."""
+
+
+PROGRESS_INTERVAL = 0.5  # seconds between progress reports
+Observer = Callable[[str, int, int], None]
+_observer: Observer | None = None
+
+
+def set_observer(fn: Observer | None) -> None:
+    """Receive (file name, bytes done, total bytes or 0) from every `download()` that has no `progress` of its own.
+    Used by the tray to show first-run model downloads; `total == done` marks the end of a file."""
+    global _observer
+    _observer = fn
+
+
+def _console_progress() -> bool:
+    err = sys.stderr  # None in a windowed process
+    return err is not None and hasattr(err, "isatty") and err.isatty()
+
+
+def download(url: str, dest: Path, progress: Callable[[int, int], None] | None = None,
+             cancel: threading.Event | None = None) -> Path:
+    """Resumable download. `progress(done, total)` (total 0 = unknown) is called about twice a second and once at the
+    end; `cancel` (an Event) aborts with DownloadCancelled between chunks, keeping the `.part` file."""
     if dest.exists():
         return dest
+    obs = _observer
+    report = progress or (lambda done, total: obs(dest.name, done, total) if obs else None)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     have = part.stat().st_size if part.exists() else 0
@@ -29,26 +57,41 @@ def download(url: str, dest: Path) -> Path:
         if r.status_code != 206:
             have = 0  # server ignored the range; start over
         total = have + int(r.headers.get("content-length", 0))
-        done, last = have, 0.0
+        done, last = have, float('-inf')
+        tty = _console_progress()
         with open(part, "ab" if have else "wb") as f:
             for chunk in r.iter_bytes(1 << 20):
+                if cancel is not None and cancel.is_set():
+                    raise DownloadCancelled(dest.name)
                 f.write(chunk)
                 done += len(chunk)
-                if sys.stderr.isatty() and time.monotonic() - last > 0.5:
+                if time.monotonic() - last >= PROGRESS_INTERVAL:
                     last = time.monotonic()
-                    pct = f"{done / total:5.1%}" if total else ""
-                    print(f"\r  {dest.name}: {done / 1e9:.2f} GB {pct}", end="", file=sys.stderr, flush=True)
-    if sys.stderr.isatty():
+                    _safe(report, done, total)
+                    if tty:
+                        pct = f"{done / total:5.1%}" if total else ""
+                        print(f"\r  {dest.name}: {done / 1e9:.2f} GB {pct}", end="", file=sys.stderr, flush=True)
+    if tty:
         print(file=sys.stderr)
     part.replace(dest)
+    _safe(report, done, done)
     return dest
+
+
+def _safe(report: Callable[[int, int], None], done: int, total: int) -> None:
+    try:
+        report(done, total)
+    except Exception:  # a broken progress display must never fail a download
+        log.debug("progress callback failed", exc_info=True)
 
 
 class DownloadError(Exception):
     """A verified download failed (wrong size or hash, or too much data)."""
 
 
-def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int) -> Path:
+def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
+                      progress: Callable[[int, int], None] | None = None,
+                      cancel: threading.Event | None = None) -> Path:
     """Stream `url` to `dest`, accepting it only if it is exactly `size` bytes with the given sha256.
 
     `open_stream(url)` is a context manager yielding a response (lets the caller control TLS and
@@ -61,7 +104,11 @@ def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int)
     try:
         with open_stream(url) as r, open(part, "wb") as f:
             for chunk in r.iter_bytes(1 << 20):
+                if cancel is not None and cancel.is_set():
+                    raise DownloadCancelled(dest.name)
                 done += len(chunk)
+                if progress is not None:
+                    _safe(progress, done, size)
                 if done > size:
                     raise DownloadError("download is larger than announced")
                 digest.update(chunk)

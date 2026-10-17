@@ -231,6 +231,25 @@ class InstallTests(Base):
             self.assertNotIn(broad, out)
         (d / "x.txt").write_text("still usable")
 
+    def test_child_processes_get_no_console_window(self):
+        """A windowed parent must not flash a console for icacls or the self-check."""
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(kw)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        with mock.patch.object(install.subprocess, "run", fake_run),                 mock.patch.dict(os.environ, {"USERNAME": "tester"}):
+            install.run_self_check(self.tmp)
+            if sys.platform == "win32":
+                install.harden_dir(self.tmp / "h")
+        self.assertEqual(len(calls), 2 if sys.platform == "win32" else 1)
+        for kw in calls:
+            self.assertEqual(kw.get("creationflags"), flag)
+        if sys.platform == "win32":
+            self.assertNotEqual(flag, 0)
+
     def test_default_self_check_runs_exe(self):
         self.assertFalse(install.run_self_check(self.tmp))  # no exe there: False, not an exception
 
