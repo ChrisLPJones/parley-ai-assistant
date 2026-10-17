@@ -76,6 +76,12 @@ class LlmConfig:
 
 
 @dataclass
+class ToolsConfig:
+    enabled: bool = True  # let the LLM look at files/folders and open things on this computer
+    web_search: bool = True  # and search the web (DuckDuckGo locally; Claude uses Anthropic's search)
+
+
+@dataclass
 class TtsConfig:
     voice: str = "af_heart"
     speed: float = 1.1
@@ -89,6 +95,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
 
 

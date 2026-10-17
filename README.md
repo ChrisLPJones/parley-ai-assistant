@@ -48,6 +48,21 @@ Defaults are `claude-opus-5-5` (at low effort for quick replies) and OpenAI's `c
 change either with `model`. Any other GGUF works locally via `model_repo` + `model_file`, and
 `backend = "ollama"` / `"server"` uses a local server you already run.
 
+## What you can ask it to do
+
+Besides answering questions, Parley can act on your computer and look things up:
+
+- **"What's in here?" / "How many files are in this folder?"** with File Explorer open (counts, sizes, file types)
+- **"Read this"** with a file selected in Explorer, or "read notes.txt in Downloads"
+- **"Find my CV"**, **"Open Downloads"**, **"Open Spotify"**, **"Open youtube.com"**
+- **"What's the weather in Auckland?"** or anything current, via web search
+
+"This" and "here" mean the folder and selection in the File Explorer window you're using.
+Everything is read-only except opening things, and Parley only opens folders, documents, websites
+and Start menu apps, never scripts or programs by path. Files that may hold secrets (SSH keys,
+`.env`, credential stores) are off limits. With a cloud backend, whatever a tool reads is sent to
+that provider as part of the conversation. Turn tools off with `[tools] enabled = false`.
+
 ## Requirements
 
 - Windows 10/11 (Linux and macOS should work, untested)

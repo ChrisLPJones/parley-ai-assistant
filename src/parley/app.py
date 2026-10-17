@@ -53,7 +53,7 @@ class Parley:
             elif llm.backend in CLOUD_BACKENDS:
                 log.info("Using %s: what you say is transcribed locally, then the text is sent to %s",
                          CLOUD_BACKENDS[llm.backend], CLOUD_BACKENDS[llm.backend])
-            self.chat = create_chat(llm, base_url, local_model)
+            self.chat = create_chat(llm, self.cfg.tools, base_url, local_model)
             self.chat.warm_up()
         except BaseException as e:  # incl. SystemExit for config errors, re-raised on the main thread
             self._llm_error = e
@@ -124,7 +124,7 @@ class Parley:
         if self.is_current(turn):
             for sentence in splitter.flush():
                 self._sentences.put((turn, sentence, t0))
-            log.info("Parley: %s", "".join(answer).strip())
+            log.info("Parley: %s", " ".join("".join(answer).split()))
 
     def _speak_loop(self) -> None:
         first = True

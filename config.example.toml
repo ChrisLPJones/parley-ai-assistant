@@ -47,6 +47,10 @@ history_turns = 10
 reset_after_idle_s = 300
 # system_prompt = "You are Parley, ..."
 
+[tools]
+enabled = true      # let the LLM look at files/folders and open apps, files, folders and websites
+web_search = true   # and search the web (DuckDuckGo locally; Claude uses Anthropic's web search)
+
 [tts]
 voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
 speed = 1.1

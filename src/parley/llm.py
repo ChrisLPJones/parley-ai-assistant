@@ -1,5 +1,8 @@
-"""Streaming chat. Conversation history lives in Chat; each backend is a small provider that streams
-one reply: Parley's built-in llama-server, Ollama, any OpenAI-compatible server, OpenAI, or Claude."""
+"""Streaming chat with tool use. Chat owns the conversation; each backend is a provider whose run()
+streams one reply, running any tools the model asks for along the way and recording the whole
+exchange in the history: Parley's built-in llama-server, Ollama, any OpenAI-compatible server,
+OpenAI, or Claude."""
+import datetime
 import json
 import logging
 import os
@@ -8,17 +11,21 @@ from typing import Callable, Iterator
 
 import httpx
 
-from .config import LlmConfig
+from .config import LlmConfig, ToolsConfig
+from .tools import TOOLS_PROMPT, Toolbox, toolbox
 
 log = logging.getLogger(__name__)
 
 CLOUD_BACKENDS = {"openai": "OpenAI", "anthropic": "Anthropic"}
+MAX_TOOL_ROUNDS = 6
+TOO_MANY_STEPS = "Sorry, that took too many steps, so I stopped."
 
 
 class Chat:
-    def __init__(self, cfg: LlmConfig, provider):
+    def __init__(self, cfg: LlmConfig, provider, web: bool):
         self.cfg = cfg
         self.provider = provider
+        self.web = web
         self.history: list[dict] = []
         self.last_used = 0.0
 
@@ -27,55 +34,73 @@ class Chat:
         self.provider.warm_up()
         log.info("LLM ready: %s (%.1fs)", self.provider.describe(), time.perf_counter() - start)
 
+    def _system(self) -> str:
+        prompt = self.cfg.system_prompt + f" Today is {datetime.date.today():%A %d %B %Y}."
+        if self.provider.toolbox:
+            prompt += TOOLS_PROMPT.format(web=", and search the web" if self.web else "")
+        return prompt
+
     def reply(self, text: str, cancelled: Callable[[], bool]) -> Iterator[str]:
-        """Yield the reply in pieces as they're generated; stops early if cancelled() turns true."""
+        """Yield the spoken reply in pieces as it's generated; stops early if cancelled() turns true."""
         if self.history and time.monotonic() - self.last_used > self.cfg.reset_after_idle_s:
             log.info("Idle for a while, starting a fresh conversation")
             self.history = []
-        self.history = self.history[-2 * self.cfg.history_turns:] + [{"role": "user", "content": text}]
-        stream = self.provider.stream(self.cfg.system_prompt, self.history)
-        answer = []
+        start = len(self.history)
+        self.history.append({"role": "user", "content": text})
+        done = spoke = False
         try:
-            for piece in stream:
-                if cancelled():
-                    break
-                answer.append(piece)
+            for piece in self.provider.run(self._system(), self.history, cancelled):
+                spoke = spoke or bool(piece.strip())
                 yield piece
+            done = not cancelled()
+            if done and not spoke:
+                yield "Sorry, I didn't come up with an answer for that."
         finally:
-            stream.close()  # closes the HTTP response, so the server stops generating
             self.last_used = time.monotonic()
-            if answer:
-                self.history.append({"role": "assistant", "content": "".join(answer)})
+            if done:
+                self._trim()
             else:
-                self.history.pop()  # keep user/assistant turns paired
+                # Interrupted or failed: drop the half-finished exchange (it may end in a tool call
+                # with no result, which the next request would be rejected for)
+                del self.history[start:]
+
+    def _trim(self) -> None:
+        # Cut at a user question, never between a tool call and its result
+        questions = [i for i, m in enumerate(self.history) if m["role"] == "user" and isinstance(m["content"], str)]
+        if len(questions) > self.cfg.history_turns:
+            del self.history[:questions[-self.cfg.history_turns]]
 
 
-def create(cfg: LlmConfig, base_url: str | None = None, local_model: str = "local") -> Chat:
+def create(cfg: LlmConfig, tools_cfg: ToolsConfig, base_url: str | None = None, local_model: str = "local") -> Chat:
     """Build the chat for cfg.backend. base_url/local_model describe the built-in llama-server."""
+    web = tools_cfg.enabled and tools_cfg.web_search
     if cfg.backend == "anthropic":
         from .claude import ClaudeProvider
-        return Chat(cfg, ClaudeProvider(cfg))
+        # Claude brings its own (better) web search and fetch, so the local web tools aren't added
+        tb = toolbox(web, local_web=False) if tools_cfg.enabled else None
+        return Chat(cfg, ClaudeProvider(cfg, tb, web), web)
+    tb = toolbox(web) if tools_cfg.enabled else None
     if cfg.backend == "ollama":
-        return Chat(cfg, OllamaProvider(cfg, cfg.base_url or "http://127.0.0.1:11434"))
+        return Chat(cfg, OllamaProvider(cfg, cfg.base_url or "http://127.0.0.1:11434", tb), web)
     if cfg.backend == "openai":
         key = cfg.api_key or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise SystemExit('backend = "openai" needs an API key: set OPENAI_API_KEY or llm.api_key')
         return Chat(cfg, OpenAICompatibleProvider(
-            cfg, cfg.base_url or "https://api.openai.com/v1", key, cfg.model or "chat-latest", cloud=True))
+            cfg, tb, cfg.base_url or "https://api.openai.com/v1", key, cfg.model or "chat-latest", cloud=True), web)
     if cfg.backend == "server":
-        return Chat(cfg, OpenAICompatibleProvider(cfg, cfg.base_url or "http://127.0.0.1:8080/v1", cfg.api_key, cfg.model))
+        return Chat(cfg, OpenAICompatibleProvider(cfg, tb, cfg.base_url or "http://127.0.0.1:8080/v1", cfg.api_key, cfg.model), web)
     if cfg.backend == "builtin":
-        return Chat(cfg, OpenAICompatibleProvider(cfg, base_url, None, local_model, builtin=True))
+        return Chat(cfg, OpenAICompatibleProvider(cfg, tb, base_url, None, local_model, builtin=True), web)
     raise SystemExit(f"Unknown llm.backend {cfg.backend!r}; use builtin, anthropic, openai, ollama or server")
 
 
 class OpenAICompatibleProvider:
-    """Chat Completions streaming: OpenAI itself, llama-server, LM Studio, vLLM, ..."""
+    """Chat Completions streaming with function calling: OpenAI itself, llama-server, LM Studio, vLLM, ..."""
 
-    def __init__(self, cfg: LlmConfig, base_url: str, api_key: str | None, model: str,
+    def __init__(self, cfg: LlmConfig, tb: Toolbox | None, base_url: str, api_key: str | None, model: str,
                  cloud: bool = False, builtin: bool = False):
-        self.cfg, self.cloud, self.builtin = cfg, cloud, builtin
+        self.cfg, self.toolbox, self.cloud, self.builtin = cfg, tb, cloud, builtin
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.client = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=httpx.Timeout(15, read=300))
         self.model = model or self._first_model()
@@ -123,24 +148,51 @@ class OpenAICompatibleProvider:
             raise SystemExit(f"OpenAI model {self.model!r} isn't available ({detail}). Set llm.model in config.toml.")
         raise RuntimeError(f"HTTP {r.status_code} from {self.client.base_url}: {detail}")
 
-    def stream(self, system: str, history: list[dict]) -> Iterator[str]:
-        messages = [{"role": "system", "content": system}] + history
-        with self.client.stream("POST", "/chat/completions", json=self._body(messages)) as r:
-            self._check(r)
-            for line in r.iter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    return
-                choices = json.loads(payload).get("choices") or [{}]
-                if piece := choices[0].get("delta", {}).get("content"):
-                    yield piece
+    def run(self, system: str, history: list[dict], cancelled: Callable[[], bool]) -> Iterator[str]:
+        spoke = False
+        for _ in range(MAX_TOOL_ROUNDS):
+            body = self._body([{"role": "system", "content": system}] + history)
+            if self.toolbox:
+                body["tools"] = self.toolbox.openai()
+            text, calls = [], {}
+            with self.client.stream("POST", "/chat/completions", json=body) as r:
+                self._check(r)
+                for line in r.iter_lines():
+                    if cancelled():
+                        return
+                    if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                        continue
+                    delta = (json.loads(line[5:]).get("choices") or [{}])[0].get("delta") or {}
+                    if piece := delta.get("content"):
+                        text.append(piece)
+                        yield piece
+                    for tc in delta.get("tool_calls") or []:  # arrives in fragments, keyed by index
+                        call = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                        fn = tc.get("function") or {}
+                        call["id"] = tc.get("id") or call["id"]
+                        call["name"] += fn.get("name") or ""
+                        call["arguments"] += fn.get("arguments") or ""
+            message = {"role": "assistant", "content": "".join(text)}
+            if not calls:
+                history.append(message)
+                return
+            message["tool_calls"] = [
+                {"id": c["id"] or f"call_{i}", "type": "function", "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                for i, c in sorted(calls.items())
+            ]
+            history.append(message)
+            # Speak "Let me check" now, before the tools run, or a filler if they're slow
+            yield "\n\n" if text else self.toolbox.filler([tc["function"]["name"] for tc in message["tool_calls"]], spoke)
+            spoke = True
+            for tc in message["tool_calls"]:
+                result, _ = self.toolbox.call(tc["function"]["name"], tc["function"]["arguments"])
+                history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+        yield TOO_MANY_STEPS
 
 
 class OllamaProvider:
-    def __init__(self, cfg: LlmConfig, base_url: str):
-        self.cfg = cfg
+    def __init__(self, cfg: LlmConfig, base_url: str, tb: Toolbox | None):
+        self.cfg, self.toolbox = cfg, tb
         self.client = httpx.Client(base_url=base_url.rstrip("/"), timeout=httpx.Timeout(10, read=300))
         self.model = cfg.model or self._first_model()
 
@@ -165,18 +217,35 @@ class OllamaProvider:
             "model": self.model, "keep_alive": self.cfg.keep_alive, "options": self._options(),
         }).raise_for_status()
 
-    def stream(self, system: str, history: list[dict]) -> Iterator[str]:
-        body = {
-            "model": self.model, "messages": [{"role": "system", "content": system}] + history, "stream": True,
-            "think": self.cfg.think, "keep_alive": self.cfg.keep_alive, "options": self._options(),
-        }
-        with self.client.stream("POST", "/api/chat", json=body) as r:
-            r.raise_for_status()
-            for line in r.iter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
-                if piece := data.get("message", {}).get("content"):
-                    yield piece
-                if data.get("done"):
-                    return
+    def run(self, system: str, history: list[dict], cancelled: Callable[[], bool]) -> Iterator[str]:
+        spoke = False
+        for _ in range(MAX_TOOL_ROUNDS):
+            body = {
+                "model": self.model, "messages": [{"role": "system", "content": system}] + history, "stream": True,
+                "think": self.cfg.think, "keep_alive": self.cfg.keep_alive, "options": self._options(),
+            }
+            if self.toolbox:
+                body["tools"] = self.toolbox.openai()
+            text, calls = [], []
+            with self.client.stream("POST", "/api/chat", json=body) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if cancelled():
+                        return
+                    if not line:
+                        continue
+                    message = json.loads(line).get("message", {})
+                    if piece := message.get("content"):
+                        text.append(piece)
+                        yield piece
+                    calls += message.get("tool_calls") or []
+            history.append({"role": "assistant", "content": "".join(text), **({"tool_calls": calls} if calls else {})})
+            if not calls:
+                return
+            yield "\n\n" if text else self.toolbox.filler([c.get("function", {}).get("name", "") for c in calls], spoke)
+            spoke = True
+            for call in calls:
+                fn = call.get("function", {})
+                result, _ = self.toolbox.call(fn.get("name", ""), fn.get("arguments") or {})
+                history.append({"role": "tool", "content": result, "tool_name": fn.get("name", "")})
+        yield TOO_MANY_STEPS

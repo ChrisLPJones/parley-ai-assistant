@@ -48,12 +48,11 @@ def main() -> None:
     args = parser.parse_args()
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    if args.verbose:
+        logging.getLogger("parley").setLevel(logging.DEBUG)  # Parley's own timings, not every library's
     # Libraries like huggingface_hub re-enable httpx request logging, so filter at the handler instead
-    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer")
+    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer", "ddgs", "primp")
     for handler in logging.getLogger().handlers:
         handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
 
