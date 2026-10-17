@@ -20,8 +20,8 @@ beam_size = 1
 
 [llm]
 # builtin   - Parley downloads and runs a small local model itself (default; private and offline)
-# anthropic - Claude via the Anthropic API: set ANTHROPIC_API_KEY (or api_key below)
-# openai    - OpenAI API: set OPENAI_API_KEY (or api_key below)
+# anthropic - Claude via the Anthropic API: parley --set-key anthropic (or set ANTHROPIC_API_KEY)
+# openai    - OpenAI API: parley --set-key openai (or set OPENAI_API_KEY)
 # ollama / server - a local server you already run (Ollama / any OpenAI-compatible server)
 backend = "builtin"
 
@@ -38,7 +38,8 @@ think = false              # reasoning models think before answering: smarter, m
 
 # anthropic / openai
 # model = ""               # "" = claude-opus-5-5 for anthropic, chat-latest for openai
-# api_key = ""             # prefer the ANTHROPIC_API_KEY / OPENAI_API_KEY environment variables
+# api_key = ""             # legacy: a key here is moved into the Windows credential store at startup and removed from this file.
+#                          # Save one with "parley --set-key anthropic|openai", or use the ANTHROPIC_API_KEY / OPENAI_API_KEY environment variable
 effort = "low"             # anthropic: low | medium | high (low answers fastest)
 
 # ollama / server

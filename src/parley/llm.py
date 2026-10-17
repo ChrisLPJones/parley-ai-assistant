@@ -5,12 +5,12 @@ OpenAI, or Claude."""
 import datetime
 import json
 import logging
-import os
 import time
 from typing import Callable, Iterator
 
 import httpx
 
+from . import credstore
 from .config import LlmConfig, ToolsConfig
 from .tools import TOOLS_PROMPT, Toolbox, toolbox
 
@@ -83,13 +83,18 @@ def create(cfg: LlmConfig, tools_cfg: ToolsConfig, base_url: str | None = None, 
     if cfg.backend == "ollama":
         return Chat(cfg, OllamaProvider(cfg, cfg.base_url or "http://127.0.0.1:11434", tb), web)
     if cfg.backend == "openai":
-        key = cfg.api_key or os.environ.get("OPENAI_API_KEY")
+        key = credstore.resolve_api_key("openai", cfg)
         if not key:
-            raise SystemExit('backend = "openai" needs an API key: set OPENAI_API_KEY or llm.api_key')
+            raise SystemExit('backend = "openai" needs an API key: run "parley --set-key openai" or set OPENAI_API_KEY')
+        credstore.warn_if_custom_endpoint("openai", cfg.base_url or "https://api.openai.com/v1")
         return Chat(cfg, OpenAICompatibleProvider(
             cfg, tb, cfg.base_url or "https://api.openai.com/v1", key, cfg.model or "chat-latest", cloud=True), web)
     if cfg.backend == "server":
-        return Chat(cfg, OpenAICompatibleProvider(cfg, tb, cfg.base_url or "http://127.0.0.1:8080/v1", cfg.api_key, cfg.model), web)
+        url = cfg.base_url or "http://127.0.0.1:8080/v1"
+        if cfg.api_key:  # a server key stays in config.toml (it is not an Anthropic / OpenAI key)
+            credstore.register_secret(cfg.api_key)
+            credstore.warn_if_custom_endpoint("server", url, loopback_ok=True)
+        return Chat(cfg, OpenAICompatibleProvider(cfg, tb, url, cfg.api_key, cfg.model), web)
     if cfg.backend == "builtin":
         return Chat(cfg, OpenAICompatibleProvider(cfg, tb, base_url, None, local_model, builtin=True), web)
     raise SystemExit(f"Unknown llm.backend {cfg.backend!r}; use builtin, anthropic, openai, ollama or server")

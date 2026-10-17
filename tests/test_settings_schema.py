@@ -84,8 +84,7 @@ class ValidatorTests(unittest.TestCase):
         self.bad("llm.effort", "max")
 
     def test_ranges(self):
-        for path, lo, hi in [("audio.preroll_ms", 0, 2000), ("stt.beam_size", 1, 10), ("llm.num_ctx", 0, 131072),
-                             ("llm.history_turns", 0, 100), ("llm.gpu_layers", -1, 999), ("stt.cpu_threads", 0, 64)]:
+        for path, lo, hi in [("audio.preroll_ms", 0, 2000), ("stt.beam_size", 1, 10), ("llm.history_turns", 0, 100), ("llm.gpu_layers", -1, 999), ("stt.cpu_threads", 0, 64)]:
             self.ok(path, lo)
             self.ok(path, hi)
             self.bad(path, lo - 1, hi + 1, 1.5, "3", True, None)
@@ -94,6 +93,11 @@ class ValidatorTests(unittest.TestCase):
             self.ok(path, hi)
             self.ok(path, 1, 1.0)
             self.bad(path, lo - 0.01, hi + 0.01, float("nan"), float("inf"), "1", True)
+
+    def test_num_ctx_is_zero_or_512_to_131072(self):
+        for good in (0, 512, 8192, 131072):
+            self.ok("llm.num_ctx", good)
+        self.bad("llm.num_ctx", 1, 511, 131073, -1, 1.5, "0", True, None)
 
     def test_bools_are_strict(self):
         self.ok("audio.sounds", False)
@@ -157,9 +161,11 @@ class ValidatorTests(unittest.TestCase):
 
     def test_audio_device(self):
         self.ok("audio.input_device", None)
+        self.assertIsNone(ss.validate("audio.input_device", ""))
+        self.assertIsNone(ss.validate("audio.output_device", ""))
         self.ok("audio.input_device", 2)
         self.ok("audio.input_device", "USB Microphone")
-        self.bad("audio.input_device", "", -1, True, 1.5, "x\n", "x" * 300)
+        self.bad("audio.input_device", " ", -1, True, 1.5, "x\n", "x" * 300)
 
     def test_api_key_error_does_not_echo_the_key(self):
         secret = "sk-ant-secret value"
@@ -167,6 +173,11 @@ class ValidatorTests(unittest.TestCase):
             ss.validate("llm.api_key", secret)
         self.assertNotIn("secret", str(cm.exception))
         self.ok("llm.api_key", "sk-ant-abc123")
+        self.ok("llm.api_key", "")
+        self.ok("llm.api_key", "k" * 512)
+
+    def test_api_key_shape(self):
+        self.bad("llm.api_key", "k" * 513, "nul\0key", "bell\x07key", "caf\u00e9", "tab\tkey", "new\nline", None, 5)
 
 
 if __name__ == "__main__":

@@ -15,8 +15,8 @@ SPEAKER_RATE = 24000  # what Kokoro produces
 
 
 def _device(spec, kind: str):
-    if spec is None or isinstance(spec, int):
-        return spec
+    if spec is None or spec == "" or isinstance(spec, int):  # "" = system default
+        return spec if spec != "" else None
     for i, dev in enumerate(sd.query_devices()):
         if spec.lower() in dev["name"].lower() and dev[f"max_{kind}_channels"] > 0:
             return i

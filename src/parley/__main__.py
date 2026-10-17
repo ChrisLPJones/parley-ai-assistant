@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, config
+from . import __version__, config, credstore
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +151,12 @@ def main() -> None:
     parser.add_argument("--test-mic", action="store_true", help="record a few seconds and show the level and what was heard")
     parser.add_argument("--self-check", action="store_true",
                         help="check that the config loads and all modules and libraries import (no mic, no network), then exit")
+    keys = credstore.KEY_BACKENDS
+    parser.add_argument("--set-key", metavar="BACKEND", choices=keys,
+                        help="save an API key in the Windows credential store (asks for it without echo), then exit")
+    parser.add_argument("--delete-key", metavar="BACKEND", choices=keys, help="delete a saved API key, then exit")
+    parser.add_argument("--key-status", action="store_true",
+                        help="show whether a key is saved per backend and which source is in use (never the key), then exit")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"parley {__version__}")
     args = parser.parse_args()
@@ -160,10 +166,11 @@ def main() -> None:
     if args.verbose:
         logging.getLogger("parley").setLevel(logging.DEBUG)  # Parley's own timings, not every library's
     # Libraries like huggingface_hub re-enable httpx request logging, so filter at the handler instead
-    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer", "ddgs", "primp")
+    noisy = ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "phonemizer", "ddgs", "primp", "anthropic", "openai")
     root = logging.getLogger()
     for handler in root.handlers:
         handler.addFilter(lambda r: r.levelno >= logging.ERROR or not r.name.startswith(noisy))
+        handler.addFilter(credstore.RedactFilter())  # last line of defence: scrubs anything shaped like a key
     # Write log lines from a background thread: if the console stops accepting output (text
     # selected, Pause pressed), only logging waits, never listening, thinking or speaking
     log_queue: queue.Queue = queue.Queue()
@@ -178,7 +185,15 @@ def main() -> None:
         print(sd.query_devices())
         return
 
+    if args.set_key:
+        return credstore.cli_set_key(args.set_key)
+    if args.delete_key:
+        return credstore.cli_delete_key(args.delete_key)
+    # Move a plaintext llm.api_key out of config.toml before the config is read (never raises)
+    credstore.migrate_legacy_key(args.config or config.default_config_path())
     cfg = config.load(args.config)
+    if args.key_status:
+        return credstore.cli_key_status(cfg)
     if args.test_mic:
         test_mic(cfg)
         return
