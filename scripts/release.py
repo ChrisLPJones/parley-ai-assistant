@@ -503,8 +503,9 @@ def publish_ssh(layout: Layout, host: str, root: str, work: Path, *, dry_run: bo
 
 def verify_instruction(url: str, version_json: bytes) -> str:
     sha = hashlib.sha256(version_json).hexdigest()
-    one_liner = f"import hashlib,urllib.request as u;print(hashlib.sha256(u.urlopen('{url}').read()).hexdigest())"
-    lines = [f"Verify the live manifest (expected sha256 {sha}):", f'  python -c "{one_liner}"',
+    code = "import hashlib,sys,urllib.request as u;print(hashlib.sha256(u.urlopen(sys.argv[1]).read()).hexdigest())"
+    cmd = shlex.join(["python", "-c", code, url])  # the URL travels as an argument, never inside the code
+    lines = [f"Verify the live manifest. URL: {url}", f"Expected sha256: {sha}", f"  {cmd}",
              "or pass --verify-url on the next release run."]
     return "\n".join(lines)
 
@@ -618,7 +619,12 @@ def run(argv: list[str] | None = None, export_hook: Callable[[Path], None] | Non
             publish_ssh(layout, a.ssh_host, a.remote_dir, work, dry_run=a.dry_run)
         if not a.dry_run:
             if a.verify_url:
-                verify_published(a.verify_url, layout.version_json, _allow_http_localhost=bool(a.test_http_feed))
+                try:
+                    verify_published(a.verify_url, layout.version_json, _allow_http_localhost=bool(a.test_http_feed))
+                except ReleaseError as e:
+                    raise ReleaseError(f"{e}\nThe publish ALREADY HAPPENED: the files are live. The tag command is withheld. "
+                                       "A CDN cache can serve the old manifest for a while and cause a false failure: "
+                                       "re-check the URL later before treating this as a bad release.") from e
             else:
                 print(verify_instruction(a.feed_url, layout.version_json))
         if not a.version_override:

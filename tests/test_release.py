@@ -470,6 +470,34 @@ class Verify(Base):
         self.assertIn(hashlib.sha256(lo.version_json).hexdigest(), text)
         self.assertNotIn("curl", text)
 
+    def test_manual_instruction_quotes_odd_urls(self):
+        url = "https://h/p/version.json?a='; rm -rf x; '\"$(id)"
+        cmd = [ln for ln in rel.verify_instruction(url, b"{}").splitlines() if ln.startswith("  python")][0]
+        parts = shlex.split(cmd)
+        self.assertEqual(parts[-1], url)  # one argument, intact
+        self.assertNotIn(url, parts[2])  # never spliced into the code
+
+    def test_cross_origin_redirect_is_refused(self):
+        lo = self.layout()
+        target = self.serve(lo.version_json)  # a different origin (other port)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        with self.assertRaisesRegex(rel.ReleaseError, "VERIFY FAILED.*another origin"):
+            rel.verify_published(f"http://127.0.0.1:{srv.server_address[1]}/parley/version.json", lo.version_json,
+                                 _allow_http_localhost=True)
+
 
 if __name__ == "__main__":
     unittest.main()

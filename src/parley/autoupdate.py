@@ -44,7 +44,12 @@ def create(app: "AppLike", cfg: Config) -> "UpdateFlow | None":
     root = install_root()
     if root is None:
         return None
-    updater = update.updater_from_build(root / STATE_FILE) if cfg.updates.check else None
+    updater = None
+    if cfg.updates.check:
+        try:
+            updater = update.updater_from_build(root / STATE_FILE)
+        except (update.UpdateError, ValueError) as e:  # bad baked-in feed URL: only the check is off, confirm/rollback notice stay
+            log.warning("Update checks are off: %s", e)
     return UpdateFlow(app, root, updater)
 
 

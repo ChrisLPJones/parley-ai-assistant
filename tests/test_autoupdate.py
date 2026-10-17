@@ -230,6 +230,24 @@ class ConfirmAndNoticeTests(FlowBase):
         UpdateFlow(again, self.root, None, version="0.1.0").start()
         self.assertEqual(again.said, [])
 
+    def test_bad_feed_url_keeps_confirm_and_rollback_notice_but_never_checks(self):
+        self.pending_020()
+        launcher.write_pointer(self.root, launcher.Pointer("0.1.0", skip=["0.2.0"]))
+        app = FakeApp()
+        with mock.patch.object(autoupdate, "install_root", return_value=self.root), \
+                mock.patch.object(update, "build_info", return_value=update.BuildInfo("http://bad.example/parley/version.json")), \
+                mock.patch.object(update.Updater, "_open", side_effect=AssertionError("no network check")), \
+                mock.patch.object(threading, "Thread", side_effect=AssertionError("no check thread")), \
+                self.assertLogs("parley.autoupdate", "WARNING"):
+            flow = autoupdate.create(app, Config())
+        flow.version = "0.1.0"
+        flow.start()
+        self.assertEqual(app.said, ["Update to 0.2.0 failed; staying on 0.1.0."])
+        launcher.write_pointer(self.root, launcher.Pointer("0.2.0", state="pending"))
+        flow2 = UpdateFlow(FakeApp(), self.root, None, version="0.2.0")
+        flow2.start()
+        self.assertEqual(self.pointer().state, "good")
+
     def test_no_notice_without_a_failed_newer_version(self):
         launcher.write_pointer(self.root, launcher.Pointer("0.2.0", skip=["0.1.5"]))
         app = FakeApp()
@@ -269,11 +287,15 @@ class OffModeTests(unittest.TestCase):
             seed(root, "0.1.0", tree())
             with mock.patch.object(autoupdate, "install_root", return_value=root), \
                     mock.patch.object(update, "build_info", return_value=update.BuildInfo("http://bad.example/parley/version.json")):
-                with self.assertRaises(update.UpdateError):  # what create() does with it
-                    autoupdate.create(FakeApp(), Config())
-                with self.assertLogs("parley.__main__", "WARNING") as logs:
+                with self.assertLogs("parley.autoupdate", "WARNING") as logs:
+                    flow = autoupdate.create(FakeApp(), Config())
+                self.assertIn("Update checks are off", logs.output[0])
+                self.assertIsNotNone(flow)
+                self.assertIsNone(flow.updater)
+                # anything unexpected in create() itself still only turns updates off
+                with mock.patch.object(autoupdate, "create", side_effect=RuntimeError("boom")), \
+                        self.assertLogs("parley.__main__", "WARNING"):
                     self.assertIsNone(cli.create_update_flow(FakeApp(), Config()))
-                self.assertIn("Updates are off", logs.output[0])
 
     def test_feed_url_is_not_a_config_setting(self):
         from dataclasses import fields
