@@ -73,7 +73,7 @@ class Player:
     BLOCK = SPEAKER_RATE // 20
 
     def __init__(self, device=None, is_current: Callable[[int], bool] = lambda turn: True):
-        self._queue: queue.Queue[tuple[int, np.ndarray, Callable | None]] = queue.Queue()
+        self.queue: queue.Queue[tuple[int, np.ndarray, Callable | None]] = queue.Queue()  # unfinished_tasks = still playing
         self._is_current = is_current
         self._stream = sd.OutputStream(
             samplerate=SPEAKER_RATE, channels=1, dtype="float32", device=_device(device, "output"),
@@ -82,16 +82,19 @@ class Player:
         threading.Thread(target=self._run, daemon=True, name="player").start()
 
     def play(self, turn: int, samples: np.ndarray, on_start: Callable | None = None) -> None:
-        self._queue.put((turn, samples, on_start))
+        self.queue.put((turn, samples, on_start))
 
     def _run(self) -> None:
         while True:
-            turn, samples, on_start = self._queue.get()
-            if not self._is_current(turn):
-                continue
-            if on_start:
-                on_start()
-            for i in range(0, len(samples), self.BLOCK):
+            turn, samples, on_start = self.queue.get()
+            try:
                 if not self._is_current(turn):
-                    break
-                self._stream.write(samples[i:i + self.BLOCK])
+                    continue
+                if on_start:
+                    on_start()
+                for i in range(0, len(samples), self.BLOCK):
+                    if not self._is_current(turn):
+                        break
+                    self._stream.write(samples[i:i + self.BLOCK])
+            finally:
+                self.queue.task_done()

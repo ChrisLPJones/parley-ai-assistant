@@ -172,6 +172,7 @@ To remove everything, delete this folder and the cloned repo. Key settings (all 
 | `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
 | `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search |
 | `[tts]` | `voice`, `speed`, `device` | Kokoro voice, speed, and `auto`/`cuda`/`cpu` |
+| `[updates]` | `check` | Installed copies only (default `true`): look for a newer version after startup and ask before installing; a source checkout never updates itself. The update server is fixed at build time, not configurable |
 
 ## Troubleshooting
 

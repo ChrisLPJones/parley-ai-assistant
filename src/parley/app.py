@@ -64,6 +64,16 @@ class Parley:
     def is_current(self, turn: int) -> bool:
         return turn == self.turn
 
+    def is_busy(self) -> bool:
+        """True while a question is being recorded, transcribed, answered or spoken (used to hold back updates).
+        The queues' unfinished counts also cover an item a worker has taken but not finished."""
+        recording = self.recorder is not None and self.recorder.recording
+        return recording or any(q.unfinished_tasks for q in (self._jobs, self._sentences, self.player.queue))
+
+    def say(self, text: str) -> None:
+        """Speak a short notice of our own (e.g. about updates). Dropped if the user starts a question meanwhile."""
+        self._sentences.put((self.turn, text, time.perf_counter()))
+
     # --- hotkey events (called from the keyboard hook thread; keep them quick) ---
 
     def begin_listening(self) -> None:
@@ -94,14 +104,17 @@ class Parley:
     def _think_loop(self) -> None:
         while True:
             turn, item, t0 = self._jobs.get()
-            if not self.is_current(turn):
-                continue
             try:
-                self._think(turn, item, t0)
-            except Exception:
-                log.exception("Failed to answer")
-                self._sentences.put((turn, "Sorry, something went wrong.", t0))
-            self._sentences.put((turn, None, t0))  # end of turn
+                if not self.is_current(turn):
+                    continue
+                try:
+                    self._think(turn, item, t0)
+                except Exception:
+                    log.exception("Failed to answer")
+                    self._sentences.put((turn, "Sorry, something went wrong.", t0))
+                self._sentences.put((turn, None, t0))  # end of turn
+            finally:
+                self._jobs.task_done()  # after the follow-up puts, so is_busy() never sees a gap
 
     def _think(self, turn: int, item: np.ndarray | str, t0: float) -> None:
         if isinstance(item, str):
@@ -140,17 +153,20 @@ class Parley:
         first = True
         while True:
             turn, sentence, t0 = self._sentences.get()
-            if sentence is None:
-                first = True
-                self.player.play(turn, np.zeros(0, dtype=np.float32), self.finished.set)
-                continue
-            if not self.is_current(turn):
-                continue
-            t = time.perf_counter()
-            audio = self.speaker.synth(sentence)
-            log.debug("tts %.0f ms (+%.0f ms since release): %s", (time.perf_counter() - t) * 1000, (time.perf_counter() - t0) * 1000, sentence)
-            on_start = None
-            if first:
-                first = False
-                on_start = lambda t0=t0: log.info("[first audio %.0f ms after release]", (time.perf_counter() - t0) * 1000)
-            self.player.play(turn, audio, on_start)
+            try:
+                if sentence is None:
+                    first = True
+                    self.player.play(turn, np.zeros(0, dtype=np.float32), self.finished.set)
+                    continue
+                if not self.is_current(turn):
+                    continue
+                t = time.perf_counter()
+                audio = self.speaker.synth(sentence)
+                log.debug("tts %.0f ms (+%.0f ms since release): %s", (time.perf_counter() - t) * 1000, (time.perf_counter() - t0) * 1000, sentence)
+                on_start = None
+                if first:
+                    first = False
+                    on_start = lambda t0=t0: log.info("[first audio %.0f ms after release]", (time.perf_counter() - t0) * 1000)
+                self.player.play(turn, audio, on_start)
+            finally:
+                self._sentences.task_done()

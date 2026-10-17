@@ -4,6 +4,7 @@ import logging.handlers
 import os
 import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def _parse_key(name: str):
     raise SystemExit(f"Unknown hotkey {name!r}. Use a pynput key name like pause, f13, scroll_lock, ctrl_r.")
 
 
-def run_hotkey_loop(app, key_name: str) -> None:
+def run_hotkey_loop(app, key_name: str, on_ready=None, stop: threading.Event | None = None) -> None:
     from pynput import keyboard
 
     key = _parse_key(key_name)
@@ -50,7 +51,9 @@ def run_hotkey_loop(app, key_name: str) -> None:
     listener = keyboard.Listener(on_press=on_press, on_release=on_release, win32_event_filter=win32_filter)
     with listener:
         logging.info("Ready. Hold [%s] and speak; release to send. Ctrl+C to quit.", key_name)
-        while listener.is_alive():
+        if on_ready:
+            on_ready()
+        while listener.is_alive() and not (stop and stop.is_set()):
             listener.join(0.5)  # short joins keep Ctrl+C responsive on Windows
 
 
@@ -66,6 +69,36 @@ def _disable_console_quick_edit() -> None:
     mode = ctypes.c_uint32()
     if k32.GetConsoleMode(handle, ctypes.byref(mode)):
         k32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)  # -QUICK_EDIT, +EXTENDED_FLAGS
+
+
+def self_check(config_path: Path | None = None) -> int:
+    """Smoke test for a freshly built copy: config loads, every parley module imports, the hotkey, audio and model
+    libraries import. Opens no microphone and makes no network request. Returns the exit code (0 = fine)."""
+    import importlib
+    import pkgutil
+
+    log = logging.getLogger("parley.self_check")
+    problems: list[str] = []
+
+    def attempt(what: str, fn) -> None:
+        try:
+            fn()
+        except BaseException as e:  # a missing DLL can surface as anything, incl. SystemExit from a config error
+            problems.append(what)
+            log.error("self-check: %s failed: %s: %s", what, type(e).__name__, e)
+
+    attempt("config", lambda: config.load(config_path))
+    for mod in pkgutil.iter_modules(__import__("parley").__path__):
+        if mod.name != "__main__":
+            attempt(f"module parley.{mod.name}", lambda n=mod.name: importlib.import_module(f"parley.{n}"))
+    for lib in ("pynput.keyboard", "sounddevice", "numpy", "httpx", "faster_whisper", "ctranslate2",
+                "onnxruntime", "kokoro_onnx"):
+        attempt(f"library {lib}", lambda n=lib: importlib.import_module(n))
+    if problems:
+        print(f"parley {__version__} self-check FAILED: {', '.join(problems)}", file=sys.stderr)
+        return 1
+    print(f"parley {__version__} self-check ok")
+    return 0
 
 
 def test_mic(cfg, seconds: int = 4) -> None:
@@ -103,6 +136,8 @@ def main() -> None:
     parser.add_argument("--ask", metavar="TEXT", help="ask one typed question, speak the answer, and exit")
     parser.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     parser.add_argument("--test-mic", action="store_true", help="record a few seconds and show the level and what was heard")
+    parser.add_argument("--self-check", action="store_true",
+                        help="check that the config loads and all modules and libraries import (no mic, no network), then exit")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"parley {__version__}")
     args = parser.parse_args()
@@ -123,6 +158,8 @@ def main() -> None:
     root.handlers = [logging.handlers.QueueHandler(log_queue)]
     _disable_console_quick_edit()
 
+    if args.self_check:
+        return self_check(args.config)
     if args.list_devices:
         import sounddevice as sd
         print(sd.query_devices())
@@ -135,6 +172,10 @@ def main() -> None:
     from .app import Parley
 
     app = Parley(cfg, use_mic=args.ask is None)
+    flow = None
+    if args.ask is None:
+        from . import autoupdate
+        flow = autoupdate.create(app, cfg)  # None unless this is a packaged copy
     try:
         if args.ask:
             app.ask(args.ask)
@@ -142,9 +183,14 @@ def main() -> None:
                 pass
             time.sleep(0.3)  # let the output buffer drain
         else:
-            run_hotkey_loop(app, cfg.hotkey.key)
+            run_hotkey_loop(app, cfg.hotkey.key, flow.start if flow else None, flow.restart_requested if flow else None)
     except KeyboardInterrupt:
         pass
+    finally:
+        if flow:
+            flow.stop()
+    if flow and flow.restart_requested.is_set():
+        flow.restart()  # an update was installed: the launcher starts the new version
 
 
 if __name__ == "__main__":
