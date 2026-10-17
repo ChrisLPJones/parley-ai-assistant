@@ -1,6 +1,7 @@
 """Settings, loaded from a TOML file layered over the defaults below."""
 import logging
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -68,7 +69,7 @@ class LlmConfig:
     runtime: str = "auto"
     gpu_layers: int = -1  # builtin: layers on the GPU; -1 = fit automatically to free memory
     model: str = ""  # anthropic: default claude-opus-5-5; openai: default chat-latest; ollama/server: "" = first available
-    api_key: str = ""  # anthropic/openai; leave empty to use the ANTHROPIC_API_KEY / OPENAI_API_KEY env var
+    api_key: str = field(default="", repr=False)  # anthropic/openai; leave empty to use the ANTHROPIC_API_KEY / OPENAI_API_KEY env var
     effort: str = "low"  # anthropic: low | medium | high; low answers fastest
     base_url: str = ""  # openai/ollama/server: override the endpoint
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -142,12 +143,24 @@ def default_config_path() -> Path:
     return app_dir() / "config.toml"
 
 
+def toml_error_sentence(e: Exception, path: Path) -> str:
+    """One short sentence with the line number; never the file's text (it may hold an API key)."""
+    m = re.search(r"\(at line (\d+)", str(e))
+    reason = re.sub(r"\s*\(at .*$", "", str(e)).strip()[:60]
+    where = f" at line {m.group(1)}" if m else ""
+    return f"{path.name} has a mistake{where} ({reason}). Fix that line, or delete the file to start over."
+
+
 def load(path: Path | None = None) -> Config:
     cfg = Config()
     path = path or default_config_path()
     if path.exists():
-        with open(path, "rb") as f:
-            _apply(cfg, tomllib.load(f), "")
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise SystemExit(toml_error_sentence(e, path)) from None
+        _apply(cfg, data, "")
         log.info("Loaded config from %s", path)
     else:
         log.info("No config file at %s, using defaults", path)
