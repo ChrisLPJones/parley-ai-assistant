@@ -1,6 +1,6 @@
 [project]
 name = "parley"
-version = "0.1.0"
+dynamic = ["version"]  # read from src/parley/__init__.py
 description = "Push-to-talk voice assistant that runs entirely on your own machine: local speech-to-text, local LLM, local text-to-speech."
 readme = "README.md"
 license = "MIT"
@@ -35,6 +35,9 @@ parley = "parley.__main__:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/parley/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/parley"]
