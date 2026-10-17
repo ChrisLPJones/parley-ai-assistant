@@ -62,6 +62,9 @@ class Transcriber:
         list(segments)
 
     def transcribe(self, audio: np.ndarray) -> str:
+        peak = float(np.abs(audio).max()) if len(audio) else 0.0
+        if 0 < peak < 0.5:
+            audio = audio * (0.5 / peak)  # quiet mics (e.g. raw XLR inputs) lose words otherwise
         segments, _ = self.model.transcribe(
             audio,
             language=self.cfg.language or None,

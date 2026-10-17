@@ -17,6 +17,7 @@ from .tts import SentenceSplitter, Speaker
 log = logging.getLogger(__name__)
 
 MIN_SPEECH_S = 0.3
+SILENT_LEVEL = 0.005  # peak below this means the mic isn't picking anything up
 
 
 class Parley:
@@ -104,11 +105,18 @@ class Parley:
         if isinstance(item, str):
             text = item
         else:
+            level = float(np.abs(item).max()) if len(item) else 0.0
+            log.info("Recorded %.1fs, peak level %.0f%%", len(item) / MIC_RATE, level * 100)
             if len(item) < MIN_SPEECH_S * MIC_RATE:
+                return  # a tap of the key, not a question
+            if level < SILENT_LEVEL:
+                log.warning("The microphone is silent. Run `parley --test-mic` to check which one is being used.")
+                self._sentences.put((turn, "I couldn't hear anything. Check which microphone I'm using.", t0))
                 return
             text = self.stt.transcribe(item)
-            log.info("You: %s  [stt %.0f ms]", text or "(nothing heard)", (time.perf_counter() - t0) * 1000)
+            log.info("You: %s  [stt %.0f ms]", text or "(nothing recognised)", (time.perf_counter() - t0) * 1000)
             if not text:
+                self._sentences.put((turn, "Sorry, I didn't catch that.", t0))
                 return
         splitter = SentenceSplitter()
         first_token = None

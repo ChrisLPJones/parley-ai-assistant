@@ -38,11 +38,41 @@ def run_hotkey_loop(app, key_name: str) -> None:
             listener.join(0.5)  # short joins keep Ctrl+C responsive on Windows
 
 
+def test_mic(cfg, seconds: int = 4) -> None:
+    import numpy as np
+    import sounddevice as sd
+
+    from .audio import MIC_RATE, _device
+    from .config import app_dir
+    from .stt import Transcriber
+
+    device = _device(cfg.audio.input_device, "input")
+    used = device if device is not None else sd.default.device[0]
+    mme = next(i for i, h in enumerate(sd.query_hostapis()) if h["name"] == "MME") if sys.platform == "win32" else None
+    print("Microphones (set [audio] input_device in config.toml to a name or number):")
+    for i, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0 and (mme is None or dev["hostapi"] == mme):
+            print(f"  {'>' if i == used else ' '} {i:3}  {dev['name']}")
+    print(f"\nUsing: {sd.query_devices(used)['name']}")
+    stt = Transcriber(cfg.stt, app_dir() / "models" / "whisper")
+    input(f"Press Enter, then speak for {seconds} seconds...")
+    audio = sd.rec(seconds * MIC_RATE, samplerate=MIC_RATE, channels=1, dtype="float32", device=device)
+    for left in range(seconds, 0, -1):
+        print(f"  recording... {left}", end="\r", flush=True)
+        sd.sleep(1000)
+    sd.wait()
+    audio = audio[:, 0]
+    peak = float(np.abs(audio).max())
+    print(f"\nPeak level: {peak:.0%}" + ("  <- silent: this mic isn't picking anything up" if peak < 0.005 else "  (quiet)" if peak < 0.05 else ""))
+    print(f"Heard: {stt.transcribe(audio) or '(nothing recognised)'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="parley", description="Local push-to-talk voice assistant.")
     parser.add_argument("--config", type=Path, help=f"config file (default: {config.default_config_path()})")
     parser.add_argument("--ask", metavar="TEXT", help="ask one typed question, speak the answer, and exit")
     parser.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
+    parser.add_argument("--test-mic", action="store_true", help="record a few seconds and show the level and what was heard")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"parley {__version__}")
     args = parser.parse_args()
@@ -62,6 +92,9 @@ def main() -> None:
         return
 
     cfg = config.load(args.config)
+    if args.test_mic:
+        test_mic(cfg)
+        return
     from .app import Parley
 
     app = Parley(cfg, use_mic=args.ask is None)
