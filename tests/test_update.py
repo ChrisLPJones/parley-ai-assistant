@@ -139,12 +139,13 @@ class PathTests(unittest.TestCase):
         for p in ["../x", "a/../x", "/abs", "C:/x", "C:x", "a\\b", "a//b", "a/./b", "", ".", "x/", "con", "dir/NUL.txt",
                   "a/com1", "trail.", "sp ace /x", "a:stream", "q?", "x\x00y", 5, None, "a" * 300,
                   "con .txt", "nul .x", "COM¹", "lpt².txt", "x/aux.", "a\x7fb", "a‮b", "a b",
-                  "café", "a b"]:
+                  "café", "a b", "a!b", "a+ b", "a+:b", "a%b", "a​b"]:
             with self.assertRaises(UpdateError, msg=repr(p)):
                 update.validate_rel_path(p)
 
     def test_good_paths(self):
-        for p in ["a.exe", "app/lib/x.dll", "_internal/b-c_d.pyd", "con2/x"]:
+        for p in ["a.exe", "app/lib/x.dll", "_internal/b-c_d.pyd", "con2/x",
+                  "_internal/av.libs/libstdc++-6-abc.dll", "tzdata/zoneinfo/Etc/GMT+5", "pkg-1.0+local.dist-info/METADATA"]:
             self.assertEqual(update.validate_rel_path(p), p)
 
     def entry(self, path, data=b"x"):

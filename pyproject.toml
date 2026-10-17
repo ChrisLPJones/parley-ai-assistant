@@ -36,6 +36,11 @@ parley = "parley.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+build = [
+    "pyinstaller==6.22.3",
+]
+
 [tool.hatch.version]
 path = "src/parley/__init__.py"
 

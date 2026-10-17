@@ -40,7 +40,7 @@ RATE_GRACE = 20.0
 TIMEOUT = httpx.Timeout(10.0, read=30.0)
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", re.ASCII)
-_PART = re.compile(r"[A-Za-z0-9._-]{1,128}", re.ASCII)  # one path component: ASCII only (no spaces, DEL, bidi, NBSP)
+_PART = re.compile(r"[A-Za-z0-9._+-]{1,128}", re.ASCII)  # one path component: ASCII only (no spaces, DEL, bidi, NBSP)
 _RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$",
              *(f"com{i}" for i in [*range(1, 10), "\u00b9", "\u00b2", "\u00b3"]),
              *(f"lpt{i}" for i in [*range(1, 10), "\u00b9", "\u00b2", "\u00b3"])}
