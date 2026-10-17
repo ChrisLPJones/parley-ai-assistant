@@ -7,7 +7,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -143,6 +145,10 @@ def ensure_runtime(home: Path, runtime: str, open_stream=None) -> Path:
             except ArchiveError as e:
                 shutil.rmtree(target, ignore_errors=True)
                 raise RuntimeDownloadError(f"The language model runtime archive looked unsafe ({e}), so Parley did not unpack it.") from e
+            except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:  # corrupt archive, full disk, locked file
+                log.warning("Unpacking the llama.cpp runtime failed: %r", e)
+                shutil.rmtree(target, ignore_errors=True)
+                raise RuntimeDownloadError("The language model runtime could not be unpacked. Check the free disk space and try again.") from e
             finally:
                 archive.unlink(missing_ok=True)
         (target / ".complete").touch()

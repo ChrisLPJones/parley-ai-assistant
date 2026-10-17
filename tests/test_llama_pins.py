@@ -183,6 +183,26 @@ class EnsureRuntime(Scratch):
         exe = self.run_ensure(tar_bytes({"llama-b1/llama-server": b"ELF"}), "fake.tar.gz", "llama-server")
         self.assertEqual(exe.read_bytes(), b"ELF")
 
+    def test_corrupt_archives_give_a_short_message_and_leave_nothing(self):
+        for name, data in (("fake-asset.zip", b"PK\x03\x04 this is not really a zip" * 4),
+                           ("fake.tar.gz", b"\x1f\x8b not a gzip stream at all" * 4)):
+            with self.subTest(name=name), self.assertLogs(llama_server.log, "WARNING"), \
+                    self.assertRaises(RuntimeDownloadError) as cm:
+                self.run_ensure(data, name)
+            self.assertIn("could not be unpacked", str(cm.exception))
+            self.assertNotIn("Traceback", str(cm.exception))
+            runtime = self.root / "runtime"
+            self.assertFalse(any(runtime.rglob(".complete")))
+            self.assertEqual(list(runtime.rglob("*")), [])
+            self.assertEqual(list((self.root / "downloads").iterdir()), [])
+
+    def test_oserror_during_extraction_is_wrapped(self):
+        data = zip_bytes({"llama-server.exe": b"MZ"})
+        with mock.patch.object(llama_server, "safe_extract_zip", side_effect=OSError(28, "No space left")), \
+                self.assertLogs(llama_server.log, "WARNING"), self.assertRaises(RuntimeDownloadError):
+            self.run_ensure(data)
+        self.assertEqual(list((self.root / "runtime").rglob("*")), [])
+
     def test_hostile_zip_is_rejected_and_nothing_is_left(self):
         with self.assertRaises(RuntimeDownloadError) as cm:
             self.run_ensure(zip_bytes({"llama-server.exe": b"MZ", "../evil.dll": b"x"}))

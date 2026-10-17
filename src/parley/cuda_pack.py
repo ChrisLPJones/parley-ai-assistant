@@ -46,6 +46,7 @@ MAX_WHEEL_BYTES = 2 * 1024**3
 MAX_DLL_BYTES = 1024**3  # largest real DLL is cublasLt at about 0.67 GB
 MAX_PACK_BYTES = 6 * 1024**3
 MAX_REDIRECTS = 3
+MAX_URL_CHARS = 2048
 _MEMBER = re.compile(r"nvidia/[a-z0-9_]{1,40}/bin/[A-Za-z0-9._-]{1,100}\.dll", re.ASCII)
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -80,7 +81,7 @@ class Manifest:
 # ---------- manifest ----------
 
 def _url_ok(url: object, hosts: frozenset[str] | set[str], http_local: bool) -> str:
-    if not isinstance(url, str) or len(url) > 1024:
+    if not isinstance(url, str) or len(url) > MAX_URL_CHARS:  # live signed GitHub/PyPI redirect URLs are ~950 chars
         raise PackError("bad URL")
     try:
         u = urlsplit(url)

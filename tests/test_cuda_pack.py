@@ -187,6 +187,15 @@ class ManifestRules(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(cuda_pack.PackError):
                 cuda_pack.parse_manifest(self.doc(url=url))
 
+    def test_url_length_limit_is_2048(self):
+        hosts = {"files.pythonhosted.org"}
+        base = "https://files.pythonhosted.org/"
+        long_ok = base + "a" * (2048 - len(base))  # real signed redirect URLs are ~950 chars
+        self.assertEqual(cuda_pack._url_ok(base + "a" * 950, hosts, False), base + "a" * 950)
+        self.assertEqual(cuda_pack._url_ok(long_ok, hosts, False), long_ok)
+        with self.assertRaises(cuda_pack.PackError):
+            cuda_pack._url_ok(long_ok + "a", hosts, False)
+
     def test_not_json_and_wrong_schema(self):
         for raw in ("{", "[]", json.dumps({"schema": 2, "platform": "win_amd64", "wheels": []}), json.dumps({"schema": 1})):
             with self.subTest(raw=raw), self.assertRaises(cuda_pack.PackError):

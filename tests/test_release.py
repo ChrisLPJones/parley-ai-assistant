@@ -1,6 +1,7 @@
 """scripts/release.py (stdlib unittest, temp dirs only): server layout, local publish order, refusals, ssh command
 construction (no connection is ever made), notes, export of a ref. The real build is checked by hand (PROJECT.md)."""
 import hashlib
+import http.server
 import importlib.util
 import io
 import json
@@ -8,9 +9,11 @@ import os
 import shlex
 import sys
 import tempfile
+import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from parley import launcher, update
 
@@ -130,9 +133,18 @@ class Refusals(Base):
     def test_published_version_parse(self):
         self.assertIsNone(rel.parse_published_version(None))
         self.assertEqual(rel.parse_published_version(b'{"version": "1.2.3"}'), "1.2.3")
-        for bad in (b"nope", b'{"version": "x"}', b"[]", b"{}"):
+        for bad in (b"nope", b'{"version": "x"}', b"[]", b"{}", b"\xff\xfe"):
             with self.assertRaises(rel.ReleaseError):
                 rel.parse_published_version(bad)
+            with redirect_stderr(io.StringIO()):  # --force-republish tolerates a corrupt published manifest
+                self.assertIsNone(rel.parse_published_version(bad, True))
+
+    def test_local_corrupt_published_version_needs_force(self):
+        Path(self.root, "version.json").write_bytes(b"{corrupt")
+        with self.assertRaises(rel.ReleaseError):
+            rel.read_local_version(self.root)
+        with redirect_stderr(io.StringIO()):
+            self.assertIsNone(rel.read_local_version(self.root, True))
 
     def test_unknown_and_option_like_refs(self):
         for ref in ("no-such-ref-xyz", "--upload-pack=x", "a b", ""):
@@ -150,9 +162,53 @@ class Refusals(Base):
 
     def test_tag_is_printed_never_created(self):
         self.assertEqual(rel.tag_command("1.2.3", "a" * 40), ["git", "tag", "v1.2.3", "a" * 40])
-        src = (ROOT / "scripts" / "release.py").read_text("utf-8")
-        for forbidden in ('"push"', '"commit"', '"checkout"'):
-            self.assertNotIn(forbidden, src)
+        calls = []
+        real_run, real_popen = rel.subprocess.run, rel.subprocess.Popen
+
+        def spy_run(argv, *a, **k):
+            calls.append(list(argv))
+            return real_run(argv, *a, **k)
+
+        def spy_popen(argv, *a, **k):
+            calls.append(list(argv))
+            return real_popen(argv, *a, **k)
+        with mock.patch.object(rel.subprocess, "run", spy_run), mock.patch.object(rel.subprocess, "Popen", spy_popen):
+            sha = rel.resolve_ref("HEAD")
+            rel.check_tag("0.0.1", sha)
+            try:
+                rel.require_on_main(sha)
+            except rel.ReleaseError:
+                pass  # HEAD may be a feature branch; only the git calls made matter
+            rel.export_ref(sha, self.root / "e")
+        self.assertTrue(calls)
+        for argv in calls:
+            self.assertEqual(argv[0], "git")
+            sub = [x for x in argv[1:] if x not in ("-C", str(ROOT))][0]
+            self.assertNotIn(sub, {"tag", "push", "commit", "checkout", "add", "reset", "merge", "branch", "stash"}, argv)
+
+    def test_real_publish_fetches_origin_main_with_list_args_first(self):
+        calls = []
+
+        class P:
+            returncode, stdout, stderr = 0, "", ""
+        with mock.patch.object(rel.subprocess, "run", lambda argv, *a, **k: calls.append(list(argv)) or P()):
+            rel.fetch_origin_main()
+        self.assertEqual(calls[0][-3:], ["fetch", "origin", "main"])
+
+        class Bad(P):
+            returncode, stderr = 1, "no network"
+        with mock.patch.object(rel.subprocess, "run", lambda *a, **k: Bad()), self.assertRaisesRegex(rel.ReleaseError, "stale"):
+            rel.fetch_origin_main()
+        order = []
+        with mock.patch.object(rel, "fetch_origin_main", lambda: order.append("fetch")), \
+                mock.patch.object(rel, "resolve_ref", lambda r: order.append("resolve") or (_ for _ in ()).throw(rel.ReleaseError("stop"))):
+            with self.assertRaises(rel.ReleaseError):
+                rel.run(["--notes", "n"])  # real ssh publish: fetch first
+            self.assertEqual(order, ["fetch", "resolve"])
+            order.clear()
+            with self.assertRaises(rel.ReleaseError):
+                rel.run(["--notes", "n", "--dry-run"])
+            self.assertEqual(order, ["resolve"])  # dry run never touches the network
 
     def test_clean_env_drops_cuda(self):
         env = rel.clean_env({"PATH": os.pathsep.join(["C:\\x", "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\bin",
@@ -291,6 +347,7 @@ class Ssh(Base):
         for c in cmds:
             self.assertIn("BatchMode=yes", c.argv)
             self.assertIn("ConnectTimeout=10", c.argv)
+            self.assertIn("StrictHostKeyChecking=yes", c.argv)
         self.assertEqual(cmds[1].argv[-2:], ["incoming-0.1.1", "updates-deploy:/srv/updates/parley/"])
         self.assertEqual(cmds[3].argv[-2:], ["version.json.tmp", "updates-deploy:/srv/updates/parley/version.json.tmp"])
         self.assertEqual(cmds[1].cwd, self.root)
@@ -307,6 +364,11 @@ class Ssh(Base):
         self.assertEqual(parts[2], rel.REMOTE_MOVE)
         self.assertEqual(parts[-2:], ["/srv/a b/x", "0.1.1"])  # data travels as positional args, never spliced into the script
         self.assertNotIn("/srv/a b/x", rel.REMOTE_MOVE)
+
+    def test_every_remote_script_sets_umask_first(self):
+        for script in (rel.REMOTE_READ_VERSION, rel.REMOTE_PREPARE, rel.REMOTE_MOVE, rel.REMOTE_COMMIT):
+            self.assertTrue(script.startswith("umask 022; "), script)
+        self.assertIn("StrictHostKeyChecking=yes", rel.SSH_OPTS)
 
     def test_unsafe_values_rejected(self):
         for host, root, ver in (("a;b", "/srv/x", "0.1.1"), ("h", "/srv/$(id)", "0.1.1"), ("h", "/srv/x", "0.1.1;rm -rf")):
@@ -343,7 +405,9 @@ class Ssh(Base):
             if len(calls) == 2:
                 inc = Path(cwd, "incoming-0.1.1", "blobs")
                 self.assertEqual({p.name for p in inc.iterdir()}, set(lo.blobs) - {have})
-                self.assertFalse((Path(cwd, "version.json.tmp")).exists() and False)
+                # the manifest is staged for a later step but is not live: nothing has moved it into place yet
+                self.assertTrue(Path(cwd, "version.json.tmp").is_file())
+                self.assertFalse(Path(cwd, "version.json").exists())
             return R()
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -358,6 +422,81 @@ class Ssh(Base):
         with redirect_stdout(io.StringIO()), self.assertRaises(rel.ReleaseError):
             rel.publish_ssh(lo, "updates-deploy", "/srv/updates/parley", self.root / "w2", dry_run=False, runner=failing)
         self.assertEqual(len(calls), 2)
+
+
+class Verify(Base):
+    """Post-publish check against a local http.server (test-only http hook); never a real server."""
+
+    def serve(self, body: bytes, status: int = 200):
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}/parley/version.json"
+
+    def test_matching_bytes_verify(self):
+        lo = self.layout()
+        url = self.serve(lo.version_json)
+        with redirect_stdout(io.StringIO()) as out:
+            rel.verify_published(url, lo.version_json, _allow_http_localhost=True)
+        self.assertIn("verified", out.getvalue())
+
+    def test_different_bytes_or_error_fail_loudly(self):
+        lo = self.layout()
+        with self.assertRaisesRegex(rel.ReleaseError, "VERIFY FAILED"):
+            rel.verify_published(self.serve(lo.version_json + b" "), lo.version_json, _allow_http_localhost=True)
+        with self.assertRaisesRegex(rel.ReleaseError, "VERIFY FAILED"):
+            rel.verify_published(self.serve(b"x", 404), lo.version_json, _allow_http_localhost=True)
+
+    def test_http_refused_without_the_test_hook_and_args_checked(self):
+        lo = self.layout()
+        with self.assertRaisesRegex(rel.ReleaseError, "VERIFY FAILED"):
+            rel.verify_published("http://127.0.0.1:9/parley/version.json", lo.version_json)
+        with self.assertRaises(rel.ReleaseError):
+            rel.validate_args(rel.parse_args(["--notes", "n", "--verify-url", "http://example.com/parley/version.json"]))
+
+    def test_manual_instruction_has_expected_hash_and_no_curl(self):
+        lo = self.layout()
+        text = rel.verify_instruction("https://h/parley/version.json", lo.version_json)
+        self.assertIn(hashlib.sha256(lo.version_json).hexdigest(), text)
+        self.assertNotIn("curl", text)
+
+    def test_manual_instruction_quotes_odd_urls(self):
+        url = "https://h/p/version.json?a='; rm -rf x; '\"$(id)"
+        cmd = [ln for ln in rel.verify_instruction(url, b"{}").splitlines() if ln.startswith("  python")][0]
+        parts = shlex.split(cmd)
+        self.assertEqual(parts[-1], url)  # one argument, intact
+        self.assertNotIn(url, parts[2])  # never spliced into the code
+
+    def test_cross_origin_redirect_is_refused(self):
+        lo = self.layout()
+        target = self.serve(lo.version_json)  # a different origin (other port)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        with self.assertRaisesRegex(rel.ReleaseError, "VERIFY FAILED.*another origin"):
+            rel.verify_published(f"http://127.0.0.1:{srv.server_address[1]}/parley/version.json", lo.version_json,
+                                 _allow_http_localhost=True)
 
 
 if __name__ == "__main__":
