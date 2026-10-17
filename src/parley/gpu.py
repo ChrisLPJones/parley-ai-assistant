@@ -180,10 +180,27 @@ def pick_llama_device(devices: list[tuple[str, str]], gpu_name: str) -> str | No
     return hits[0] if len(hits) == 1 else None
 
 
+def _add_dll_dir(lib_dir: str) -> None:
+    if sys.platform == "win32":
+        os.add_dll_directory(lib_dir)
+    os.environ["PATH"] = lib_dir + os.pathsep + os.environ.get("PATH", "")
+
+
 @functools.cache
 def add_cuda_dll_dirs() -> None:
-    """Put the CUDA 12 runtime, cuBLAS, cuFFT and cuDNN from the nvidia-* wheels on the DLL search
-    path. PATH is needed as well as add_dll_directory because cuDNN loads its sub-libraries by name."""
+    """Put the CUDA 12 runtime, cuBLAS, cuFFT and cuDNN on the DLL search path. PATH is needed as well as
+    add_dll_directory because cuDNN loads its sub-libraries by name. Source installs use the nvidia-* wheels; a frozen
+    copy uses the downloaded CUDA pack (cuda_pack.py) if it is complete, else nothing (the CPU is used)."""
+    if getattr(sys, "frozen", False):
+        from . import cuda_pack
+        from .config import app_dir
+
+        if pack := cuda_pack.usable_dir(app_dir()):
+            _add_dll_dir(str(pack))
+            log.info("Using the downloaded CUDA pack in %s", pack)
+        else:
+            log.debug("No complete CUDA pack yet; CUDA libraries are not available")
+        return
     for pkg in NVIDIA_PACKAGES:
         try:
             spec = importlib.util.find_spec(pkg)
@@ -191,8 +208,5 @@ def add_cuda_dll_dirs() -> None:
             continue
         for loc in (spec.submodule_search_locations or []) if spec else []:
             lib_dir = os.path.join(loc, "bin" if sys.platform == "win32" else "lib")
-            if not os.path.isdir(lib_dir):
-                continue
-            if sys.platform == "win32":
-                os.add_dll_directory(lib_dir)
-            os.environ["PATH"] = lib_dir + os.pathsep + os.environ.get("PATH", "")
+            if os.path.isdir(lib_dir):
+                _add_dll_dir(lib_dir)

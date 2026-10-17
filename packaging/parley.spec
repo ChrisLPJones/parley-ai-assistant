@@ -1,7 +1,7 @@
 # PyInstaller spec for both executables. Run through scripts/build.py (it writes _build.py first), not directly.
 #   parley-app : onedir app tree (parley-app.exe + _internal/), goes to app/<version>/
 #   Parley     : onefile launcher, stdlib only, sits in the install root
-# No UPX (slower start, more antivirus hits). The nvidia-* CUDA wheels are NOT bundled (CUDA pack, later task).
+# No UPX (slower start, more antivirus hits). The nvidia-* CUDA wheels are NOT bundled (the CUDA pack is downloaded on first run: src/parley/cuda_pack.py).
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
@@ -27,6 +27,7 @@ for pkg in ("faster_whisper",       # assets/silero_vad*.onnx
     except Exception:
         pass
 binaries += collect_dynamic_libs("sounddevice") + collect_dynamic_libs("espeakng_loader")
+datas += [(os.path.join(SRC, "parley", "cuda_pack.json"), "parley")]  # URL/sha256 of the CUDA pack wheels
 datas += collect_data_files("_sounddevice_data")  # PortAudio DLL lives here
 binaries += collect_dynamic_libs("_sounddevice_data")
 

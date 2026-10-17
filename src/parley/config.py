@@ -103,6 +103,14 @@ class UpdatesConfig:
 
 
 @dataclass
+class GpuConfig:
+    # Packaged (installed) copies only: on an NVIDIA GPU, download the CUDA libraries (about 1.6 GB, once) on first run
+    # and use them from the next start; Parley runs on the CPU meanwhile. A source checkout uses the pip packages.
+    # Nothing is downloaded if stt.device and tts.device are both "cpu".
+    download_cuda: bool = True
+
+
+@dataclass
 class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -111,6 +119,7 @@ class Config:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
+    gpu: GpuConfig = field(default_factory=GpuConfig)
 
 
 def _apply(obj, data: dict, where: str) -> None:
