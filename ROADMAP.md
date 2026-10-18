@@ -25,6 +25,7 @@ Version 0.1.0 (early release, Windows):
 - **Code signing:** so Windows SmartScreen no longer warns about the installer.
 - **In-app updates:** an update server so Parley can offer new versions (the update mechanism is built, but no server is live yet).
 - **Linux support** (Fedora and Ubuntu): an install option, tray icon and GPU support.
+- **Wayland support**, after Linux support lands: global hold-to-talk on Wayland desktops (today the key listener needs X11).
 
 ## Known limitations
 
