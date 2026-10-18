@@ -365,7 +365,8 @@ MAX_REDIRECTS = 5
 
 def _resolve_host(host: str) -> list[str]:
     """Every address a host name resolves to (a seam for tests)."""
-    return sorted({info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(info[4][0] for info in infos))  # resolver order, no duplicates
 
 
 def _public_address(ip: str) -> bool:
@@ -376,9 +377,10 @@ def _public_address(ip: str) -> bool:
                                    or addr.is_multicast or addr.is_unspecified)
 
 
-def _check_url(url: str) -> tuple[httpx.URL, str]:
+def _check_url(url: str) -> tuple[httpx.URL, list[str]]:
     """http(s) to public addresses only: loopback holds the keyless llama-server, the LAN and 169.254.x.x hold
-    routers and cloud metadata. Returns the URL and the validated address to connect to."""
+    routers and cloud metadata. Every resolved address must be public. Returns the URL and the validated addresses,
+    in resolver order, to try in turn."""
     try:
         u = httpx.URL(url)
     except httpx.InvalidURL:
@@ -386,29 +388,41 @@ def _check_url(url: str) -> tuple[httpx.URL, str]:
     if u.scheme not in ("http", "https") or not u.host:
         raise PermissionError("I can only read http and https web pages")
     try:
-        ips = _resolve_host(u.host)
+        ips = _resolve_host(u.raw_host.decode("ascii"))
     except OSError:
         raise ValueError(f"I couldn't find the site {u.host}") from None
     if not ips or not all(_public_address(ip) for ip in ips):
         raise PermissionError("Parley won't read pages on this computer or the local network")
-    return u, ips[0]
+    return u, ips
 
 
 def _http_client() -> httpx.Client:
     return httpx.Client(timeout=15, follow_redirects=False, headers={"User-Agent": "Mozilla/5.0 (Parley voice assistant)"})
 
 
+def _send_pinned(client: httpx.Client, u: httpx.URL, ips: list[str]) -> httpx.Response:
+    """Connect to an address already checked (DNS can't change between check and use) while the Host header and
+    the TLS server name / certificate check stay on the real host name (ASCII/punycode form). Tries each validated
+    address in turn; only connection failures move on, an HTTP response is final."""
+    name = u.raw_host.decode("ascii")
+    host = f"[{name}]" if ":" in name else name
+    last = None
+    for ip in ips:
+        req = client.build_request("GET", u.copy_with(host=ip, userinfo=b""),
+                                   headers={"Host": host + (f":{u.port}" if u.port else "")},
+                                   extensions={"sni_hostname": name})
+        try:
+            return client.send(req, stream=True)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            last = e
+    raise last
+
+
 def read_webpage(url: str) -> str:
     with _http_client() as client:
         for _ in range(MAX_REDIRECTS + 1):
-            u, ip = _check_url(url)
-            # Connect to the address just checked (DNS can't change between check and use) while the Host header
-            # and the TLS server name / certificate check stay on the real host name.
-            host = f"[{u.host}]" if ":" in u.host else u.host
-            req = client.build_request("GET", u.copy_with(host=ip, userinfo=b""),
-                                       headers={"Host": host + (f":{u.port}" if u.port else "")},
-                                       extensions={"sni_hostname": u.host})
-            with contextlib.closing(client.send(req, stream=True)) as r:
+            u, ips = _check_url(url)
+            with contextlib.closing(_send_pinned(client, u, ips)) as r:
                 if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
                     url = urljoin(url, r.headers["location"])
                     continue

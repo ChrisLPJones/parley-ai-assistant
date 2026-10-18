@@ -101,6 +101,51 @@ class WebpageSsrf(Base):
         with self.assertRaises(PermissionError):
             self.read("http://mixed.example/", {"mixed.example": ["93.184.216.34", "10.0.0.1"]}, self.ok)
 
+    def test_resolver_order_preserved(self):
+        with mock.patch.object(tools.socket, "getaddrinfo", return_value=[
+                (0, 0, 0, "", ("2606:2800::1", 0)), (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("2606:2800::1", 0))]):
+            self.assertEqual(tools._resolve_host("x.example"), ["2606:2800::1", "93.184.216.34"])
+
+    def test_falls_back_to_next_address_on_connect_failure(self):
+        seen = []
+
+        def handler(request):
+            if request.url.host == "2606:2800::1":
+                raise httpx.ConnectError("unreachable", request=request)
+            return httpx.Response(200, html="<p>Via v4</p>")
+
+        out = self.read("http://dual.example/", {"dual.example": ["2606:2800::1", "93.184.216.34"]}, handler, seen)
+        self.assertIn("Via v4", out)
+        self.assertEqual([r.url.host for r in seen], ["2606:2800::1", "93.184.216.34"])
+
+    def test_http_error_does_not_fall_back(self):
+        seen = []
+        with self.assertRaises(httpx.HTTPStatusError):
+            self.read("http://dual.example/", {"dual.example": ["93.184.216.34", "93.184.216.35"]},
+                      lambda r: httpx.Response(500), seen)
+        self.assertEqual(len(seen), 1)
+
+    def test_all_addresses_failing_raises_connect_error(self):
+        def handler(request):
+            raise httpx.ConnectError("down", request=request)
+
+        with self.assertRaises(httpx.ConnectError):
+            self.read("http://dual.example/", {"dual.example": ["2606:2800::1", "93.184.216.34"]}, handler)
+
+    def test_private_address_after_public_one_refused_without_connecting(self):
+        seen = []
+        with self.assertRaises(PermissionError):
+            self.read("http://mixed.example/", {"mixed.example": ["2606:2800::1", "10.0.0.1"]}, self.ok, seen)
+        self.assertEqual(seen, [])
+
+    def test_idn_host_uses_ascii_form(self):
+        seen = []
+        out = self.read("http://bücher.de/x", {"xn--bcher-kva.de": ["93.184.216.34"]}, self.ok, seen)
+        self.assertIn("Hello page", out)
+        self.assertEqual(seen[0].headers["host"], "xn--bcher-kva.de")
+        self.assertEqual(seen[0].extensions["sni_hostname"], "xn--bcher-kva.de")
+
     def test_bad_schemes(self):
         for url in ("file:///C:/x", "ftp://example.com/", "gopher://example.com/"):
             with self.subTest(url=url), self.assertRaises(PermissionError):
