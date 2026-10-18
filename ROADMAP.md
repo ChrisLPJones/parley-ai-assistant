@@ -12,6 +12,7 @@ Version 0.1.0 (early release, Windows):
 - Optional Anthropic and OpenAI backends, with keys kept in the Windows credential store
 - Tools: read folders and files, find and open things, web search
 - Automatic NVIDIA GPU use, with CPU fallback everywhere
+- Automatic updates: Parley checks an update server, verifies each file and can roll back
 
 ## In progress
 
@@ -25,8 +26,13 @@ Version 0.1.0 (early release, Windows):
   and whether it suits your hardware.
 - **LLM page:** choose the backend and enter API keys in Settings instead of the command line.
 - **Advanced page:** the remaining configuration options.
+- **Experimental full control mode:** an opt-in setting that lets the assistant control the whole
+  PC (run commands, open and close apps, type and click, change and delete files), going well
+  beyond today's mostly read-only tools. It will be off by default and clearly marked
+  experimental. Turning it on will show a warning that explains the risks and ask you to confirm
+  every time it is enabled. It will show an indicator while active, ask before risky actions,
+  keep a log of what it did and have an instant way to switch it off.
 - **Code signing:** so Windows SmartScreen no longer warns about the installer.
-- **In-app updates:** an update server so Parley can offer new versions (the update mechanism is built, but no server is live yet).
 - **Linux support** (Fedora and Ubuntu): an install option, tray icon and GPU support.
 - **Wayland support**, after Linux support lands: global hold-to-talk on Wayland desktops (today the key listener needs X11).
 
