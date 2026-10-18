@@ -43,7 +43,7 @@ See the [usage guide](docs/USAGE.md) for details.
    seconds and work offline.
 
 An NVIDIA GPU is optional. With one, Parley downloads about 1.6 GB of CUDA libraries once, in the
-background, and uses the GPU from the next start. You do not need the CUDA toolkit.
+background, then restarts itself once (when idle) to use the GPU. You do not need the CUDA toolkit.
 
 Running a newer installer upgrades in place. Uninstalling removes the program but keeps your data
 (models, settings, GPU libraries) in `%LOCALAPPDATA%\parley`; delete that folder to remove everything.

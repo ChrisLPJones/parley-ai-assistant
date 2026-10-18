@@ -4,10 +4,13 @@
 
 Start Parley from the Start menu (see the [install steps](../README.md#install-on-windows)). The
 first run downloads several GB of models; the tray icon shows a grey ring and its tooltip and menu
-show the download progress. When it is ready the menu says "Ready - hold Pause to talk".
+show the download progress. When it is ready the menu says "Ready - hold Pause to talk", and on the very first start
+Parley also speaks a short welcome: how to use the talk key, and to right-click the Parley icon in the notification
+area and choose Settings to change anything. It is not repeated on later starts.
 
 On an NVIDIA GPU, Parley also downloads about 1.6 GB of CUDA libraries once, in the background. It
-keeps working on the CPU meanwhile and uses the GPU from the next start.
+keeps working on the CPU meanwhile; when the download is done and Parley is idle it restarts itself once in the
+background to use the GPU.
 
 ## The tray icon
 
