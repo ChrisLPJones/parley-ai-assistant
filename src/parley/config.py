@@ -42,7 +42,7 @@ class AudioConfig:
     input_device: str | int | None = None  # None = system default; name substring or index
     output_device: str | int | None = None
     preroll_ms: int = 300  # audio kept from just before the key press so first words aren't clipped
-    sounds: bool = True  # short beeps when recording starts/stops
+    sounds: bool = True  # soft pops when recording starts/stops
 
 
 @dataclass
