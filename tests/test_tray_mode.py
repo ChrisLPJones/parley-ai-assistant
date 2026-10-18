@@ -416,6 +416,48 @@ class PackRestartTests(ScratchHome):
         self.assertEqual(self.restarts, [])
 
 
+class PackRestartExtraTests(PackRestartTests):
+    def test_busy_again_right_before_restart_goes_back_to_polling(self):
+        calls = {"n": 0}
+        app = self.app.app
+
+        def busy():  # idle for the 3 polls, busy at the final look, then idle again
+            calls["n"] += 1
+            return calls["n"] == 4
+        app.is_busy = busy
+        self.app._on_pack_ready()
+        self.assertEqual(self.restarts, [1])
+        self.assertGreater(calls["n"], 7)  # the busy look reset the count: 3 more idle polls + final look
+
+    def _boot_with(self, restarted):
+        self.app.args.restarted = restarted
+        seen = {}
+
+        class P:
+            def __init__(me, cfg, use_mic=True, on_pack_ready=None):
+                seen["hook"] = on_pack_ready
+                raise SystemExit("stop here")
+        with mock.patch("parley.app.Parley", P), mock.patch("parley.config.load", return_value=SimpleNamespace(
+                hotkey=SimpleNamespace(key="pause"))), mock.patch("parley.credstore.migrate_legacy_key"):
+            self.app._boot()
+        return seen["hook"]
+
+    def test_boot_wires_the_hook_only_when_not_restarted(self):
+        self.assertEqual(self._boot_with(False), self.app._on_pack_ready)
+        self.assertIsNone(self._boot_with(True))
+
+    def test_wording_differs_without_the_hook(self):
+        from parley import cuda_pack
+        said = {}
+        for name, hook in (("with", lambda: None), ("without", None)):
+            lines = []
+            with tempfile.TemporaryDirectory(prefix="parley_test_wording_") as d,                     mock.patch.object(cuda_pack, "install"), mock.patch.object(cuda_pack, "load_manifest"),                     mock.patch.object(cuda_pack, "usable_dir", return_value=None),                     mock.patch.object(cuda_pack, "needed", return_value=True):
+                cuda_pack.maybe_download(None, None, Path(d), lines.append, frozen=True, on_installed=hook)
+            said[name] = lines[-1]
+        self.assertIn("restart in a moment", said["with"])
+        self.assertIn("next time it starts", said["without"])
+
+
 class SpeakNoticeTests(unittest.TestCase):
     def test_queues_the_sentences_then_the_end_marker_in_one_turn(self):
         import queue

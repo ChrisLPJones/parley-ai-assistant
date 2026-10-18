@@ -232,7 +232,7 @@ class TrayApp:
             from .app import Parley
             from .hotkey import HotkeyListener
 
-            app = Parley(cfg, use_mic=True, on_pack_ready=self._on_pack_ready)
+            app = Parley(cfg, use_mic=True, on_pack_ready=None if self.args.restarted else self._on_pack_ready)
             hotkey = HotkeyListener(app, cfg.hotkey.key)
             hotkey.start()
             app.on_applied = self._on_applied
@@ -353,15 +353,19 @@ class TrayApp:
         log.info("GPU libraries installed; restarting Parley when it is idle")
         quiet = 0
         while not self.quit_event.wait(IDLE_POLL_S):
-            app = self.app
-            if self._ready and not self.error and app is not None and not self._welcome_active.is_set() and not app.is_busy():
-                quiet += 1
-            else:
-                quiet = 0
+            quiet = quiet + 1 if self._is_idle() else 0
             if quiet >= IDLE_CHECKS:
+                if not self._is_idle():  # last look right before restarting
+                    quiet = 0
+                    continue
                 self.tray.balloon("Parley", "GPU libraries ready - restarting Parley")
                 self.restart_app()
                 return
+
+    def _is_idle(self) -> bool:
+        app = self.app
+        return bool(self._ready and not self.error and app is not None and not self._welcome_active.is_set()
+                    and not app.is_busy())
 
     def _key_label(self) -> str:
         return self.key_name.replace("_", " ").title()
