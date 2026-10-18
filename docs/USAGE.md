@@ -59,9 +59,11 @@ Besides answering questions, Parley can act on your computer and look things up:
 - **"What's the weather in Auckland?"** or anything current, via web search
 
 "This" and "here" mean the folder and selection in the File Explorer window you're using.
-Everything is read-only except opening things, and Parley only opens folders, documents, websites
-and Start menu apps, never scripts or programs by path. Files that may hold secrets (SSH keys,
-`.env`, credential stores) are off limits. Turn tools off with `[tools] enabled = false` in
+Everything is read-only except opening things, and Parley only opens folders, a fixed list of
+document, image, audio and video file types, websites and Start menu apps, never scripts or
+programs by path. Network paths (`\\server\share`) are refused, web pages on your own machine or
+network are never fetched, and files that may hold secrets (SSH keys, `.env`, credential stores,
+Parley's own `config.toml`) are off limits. Turn tools off with `[tools] enabled = false` in
 `config.toml` (see [Configuration](CONFIGURATION.md)).
 
 ## The Settings window

@@ -19,7 +19,10 @@ Version 0.1.0 (early release, Windows):
 
 ## Planned
 
-- **Models page:** download and switch models from Settings.
+- **Models page:** see the speech, language and voice models available and which ones are in use,
+  and upgrade or downgrade them from Settings: download a bigger or smaller model (with progress
+  and cancel), switch to it, and delete the ones you no longer need. Each model shows its size
+  and whether it suits your hardware.
 - **LLM page:** choose the backend and enter API keys in Settings instead of the command line.
 - **Advanced page:** the remaining configuration options.
 - **Code signing:** so Windows SmartScreen no longer warns about the installer.
