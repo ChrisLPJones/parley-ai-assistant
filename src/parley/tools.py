@@ -1,12 +1,15 @@
 """Actions the LLM can take: look at what's open/selected, read files, count/list/find files, open
 things, and search the web. Every tool is read-only except `open`, which only opens folders,
 documents, websites, and apps from the Start menu (never scripts or programs by path)."""
+import contextlib
 import fnmatch
 import functools
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -16,6 +19,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urljoin
 
 import httpx
 
@@ -27,9 +31,13 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Never read, list or open these, whatever the model asks for
 SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker"}
 SECRET_FILES = re.compile(r"(^\.env(\..*)?$|\.(pem|key|pfx|p12|kdbx|ppk)$|^id_(rsa|ed25519|ecdsa|dsa)$|credentials|^login data$|^cookies$)", re.I)
-# Opening these would run code, so `open` refuses them; apps are opened by Start menu name instead
-RUNNABLE = {".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
-            ".msi", ".msp", ".scr", ".hta", ".cpl", ".jar", ".py", ".pyw", ".reg", ".lnk", ".url", ".appref-ms", ".sh"}
+# Secret-like files outside any secret folder. Parley's own config.toml (may hold a server key) is matched by location.
+SECRET_FILES_EXTRA = re.compile(r"^(\.netrc|_netrc|\.npmrc|\.pypirc|consolehost_history\.txt|logins\.json|sitemanager\.xml)$", re.I)
+# `open` starts files of these plain document, media and image types only; everything else (programs, scripts,
+# shortcuts, installers, disk images, shell-handled types) is refused. Apps open by Start menu name instead.
+OPENABLE = {".txt", ".md", ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt", ".ods", ".odp", ".rtf",
+            ".csv", ".json", ".xml", ".html", ".htm", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg",
+            ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4", ".mkv", ".avi", ".mov", ".webm"}
 WEBSITE = re.compile(r"^[\w-]+(\.[\w-]+)*\.(com|org|net|io|co|uk|au|nz|ca|dev|ai|app|gov|edu|tv|me|info|news|gg)(/\S*)?$", re.I)
 SKIP_DIRS = {"appdata", "node_modules", ".git", "$recycle.bin", "windows", "program files", "program files (x86)", "programdata"}
 
@@ -83,22 +91,48 @@ def known_folder(name: str) -> Path | None:
     return path if path.exists() else None
 
 
+def _refuse_network_path(path: str | Path) -> None:
+    """UNC paths (\\\\host\\share, //host/x, \\\\?\\UNC\\..., \\\\.\\) make Windows contact a remote SMB host and
+    send the user's NTLM hash, so they are refused before the filesystem is touched."""
+    text = str(path)
+    if len(text) >= 2 and text[0] in "/\\" and text[1] in "/\\":
+        raise PermissionError("Parley doesn't open network paths")
+
+
 def resolve(path: str | None) -> Path:
     """Turn what the model said ("Downloads", "~/x", "report.txt", a full path) into a real path.
     Relative paths are taken from the folder open in Explorer, else the home folder."""
     if not path or path.strip() in (".", "here", "this folder"):
         return current_folder() or Path.home()
-    path = os.path.expandvars(os.path.expanduser(path.strip().strip('"\'')))
+    path = path.strip().strip('"\'')
+    _refuse_network_path(path)
+    path = os.path.expandvars(os.path.expanduser(path))
+    _refuse_network_path(path)
     p = Path(path)
     if not p.is_absolute():
         head, *rest = p.parts
         base = known_folder(head)
         p = base.joinpath(*rest) if base else (current_folder() or Path.home()) / p
-    return p.resolve()
+    _refuse_network_path(p)
+    p = p.resolve()
+    _refuse_network_path(p)  # a symlink, junction or mapped drive can resolve to a share
+    return p
+
+
+def _is_parley_config(p: Path) -> bool:
+    from parley.config import app_dir
+
+    if p.name.lower() not in ("config.toml", "config.toml.bak"):
+        return False
+    try:
+        return os.path.normcase(os.path.realpath(p.parent)) == os.path.normcase(os.path.realpath(app_dir()))
+    except OSError:
+        return True
 
 
 def _check_allowed(p: Path) -> None:
-    if any(part.lower() in SECRET_DIRS for part in p.parts) or SECRET_FILES.search(p.name):
+    if (any(part.lower() in SECRET_DIRS for part in p.parts) or SECRET_FILES.search(p.name)
+            or SECRET_FILES_EXTRA.search(p.name) or _is_parley_config(p)):
         raise PermissionError(f"{p.name} may contain secrets, so Parley won't touch it")
 
 
@@ -180,6 +214,10 @@ def list_folder(path: str = "", recursive: bool = False) -> str:
             truncated = True
             break
         try:
+            _check_allowed(entry)
+        except PermissionError:
+            continue  # secret files and folders (and what is inside them) are not listed or counted
+        try:
             if entry.is_dir():
                 dirs.append(entry.name)
             else:
@@ -214,13 +252,19 @@ def read_file(path: str) -> str:
 
 def find_files(name: str, folder: str = "") -> str:
     root = resolve(folder) if folder else Path.home()
+    _check_allowed(root)
     pattern = name if any(c in name for c in "*?") else f"*{name}*"
     matches, deadline = [], time.monotonic() + 5
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and d.lower() not in SECRET_DIRS and not d.startswith(".")]
         for n in filenames + dirnames:
             if fnmatch.fnmatch(n.lower(), pattern.lower()):
-                matches.append(os.path.join(dirpath, n))
+                full = os.path.join(dirpath, n)
+                try:
+                    _check_allowed(Path(full))
+                except PermissionError:
+                    continue
+                matches.append(full)
         if len(matches) >= 25 or time.monotonic() > deadline:
             break
     return json.dumps({"searched": str(root), "matches": matches[:25], "complete": time.monotonic() <= deadline and len(matches) < 25})
@@ -266,8 +310,8 @@ def open_item(target: str) -> str:
         return f"Opened {url} in the browser."
     if p.exists():
         _check_allowed(p)
-        if p.is_file() and p.suffix.lower() in RUNNABLE:
-            return f"{p.name} is a program or script. For safety Parley only opens apps by their Start menu name."
+        if p.is_file() and p.suffix.lower() not in OPENABLE:
+            return f"{p.name} isn't a document, picture, music or video file, so I won't open it. Apps open by their Start menu name."
         os.startfile(p) if sys.platform == "win32" else subprocess.Popen(["xdg-open" if sys.platform != "darwin" else "open", str(p)])
         return f"Opened {p}."
     if sys.platform == "win32":
@@ -315,14 +359,90 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data.strip())
 
 
+MAX_PAGE_BYTES = 2 * 1024 * 1024
+MAX_REDIRECTS = 5
+
+
+def _resolve_host(host: str) -> list[str]:
+    """Every address a host name resolves to (a seam for tests)."""
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(info[4][0] for info in infos))  # resolver order, no duplicates
+
+
+def _public_address(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip.split("%")[0])
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr.is_global and not (addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved
+                                   or addr.is_multicast or addr.is_unspecified)
+
+
+def _check_url(url: str) -> tuple[httpx.URL, list[str]]:
+    """http(s) to public addresses only: loopback holds the keyless llama-server, the LAN and 169.254.x.x hold
+    routers and cloud metadata. Every resolved address must be public. Returns the URL and the validated addresses,
+    in resolver order, to try in turn."""
+    try:
+        u = httpx.URL(url)
+    except httpx.InvalidURL:
+        raise ValueError("That isn't a web address I can read") from None
+    if u.scheme not in ("http", "https") or not u.host:
+        raise PermissionError("I can only read http and https web pages")
+    try:
+        ips = _resolve_host(u.raw_host.decode("ascii"))
+    except OSError:
+        raise ValueError(f"I couldn't find the site {u.host}") from None
+    if not ips or not all(_public_address(ip) for ip in ips):
+        raise PermissionError("Parley won't read pages on this computer or the local network")
+    return u, ips
+
+
+def _http_client() -> httpx.Client:
+    return httpx.Client(timeout=15, follow_redirects=False, headers={"User-Agent": "Mozilla/5.0 (Parley voice assistant)"})
+
+
+def _send_pinned(client: httpx.Client, u: httpx.URL, ips: list[str]) -> httpx.Response:
+    """Connect to an address already checked (DNS can't change between check and use) while the Host header and
+    the TLS server name / certificate check stay on the real host name (ASCII/punycode form). Tries each validated
+    address in turn; only connection failures move on, an HTTP response is final."""
+    name = u.raw_host.decode("ascii")
+    host = f"[{name}]" if ":" in name else name
+    last = None
+    for ip in ips:
+        req = client.build_request("GET", u.copy_with(host=ip, userinfo=b""),
+                                   headers={"Host": host + (f":{u.port}" if u.port else "")},
+                                   extensions={"sni_hostname": name})
+        try:
+            return client.send(req, stream=True)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            last = e
+    raise last
+
+
 def read_webpage(url: str) -> str:
-    r = httpx.get(url, follow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0 (Parley voice assistant)"})
-    r.raise_for_status()
-    if "html" not in r.headers.get("content-type", "html"):
-        return r.text[:MAX_READ_CHARS]
+    with _http_client() as client:
+        for _ in range(MAX_REDIRECTS + 1):
+            u, ips = _check_url(url)
+            with contextlib.closing(_send_pinned(client, u, ips)) as r:
+                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                    url = urljoin(url, r.headers["location"])
+                    continue
+                r.raise_for_status()
+                body = b""
+                for chunk in r.iter_bytes():
+                    body += chunk
+                    if len(body) >= MAX_PAGE_BYTES:
+                        body = body[:MAX_PAGE_BYTES]
+                        break
+                ctype = r.headers.get("content-type", "html")
+                text = body.decode(r.encoding or "utf-8", errors="replace")
+            break
+        else:
+            raise RuntimeError("That page redirected too many times")
+    if "html" not in ctype:
+        return text[:MAX_READ_CHARS]
     parser = _TextExtractor()
-    parser.feed(r.text)
-    return json.dumps({"url": str(r.url), "text": " ".join(parser.parts)[:MAX_READ_CHARS]})
+    parser.feed(text)
+    return json.dumps({"url": url, "text": " ".join(parser.parts)[:MAX_READ_CHARS]})
 
 
 # --- registry ---
@@ -393,8 +513,9 @@ class Toolbox:
             result, error = tool.func(**args), False
         except Exception as e:
             result, error = f"{type(e).__name__}: {e}", True
-        log.info("Tool %s(%s) -> %s%s [%.0f ms]", name, json.dumps(args)[:120], "ERROR " if error else "",
-                 result[:100].replace("\n", " "), (time.perf_counter() - start) * 1000)
+        # Arguments and results can hold file names, page text or secrets: log only the tool, outcome and size
+        log.info("Tool %s -> %s (%d chars) [%.0f ms]", name, "ERROR" if error else "ok", len(result),
+                 (time.perf_counter() - start) * 1000)
         return result, error
 
 
