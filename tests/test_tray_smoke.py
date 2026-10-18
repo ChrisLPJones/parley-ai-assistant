@@ -61,7 +61,7 @@ class Real(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="parley_test_traysmoke_") as home:
             print("PARLEY_HOME =", home)
             done = ts.run_tray_smoke(PYTHONW, Path(home), args=("-m", "parley", "--tray"), expect_exe=None, timeout=120)
-            self.assertEqual(len(done), 5, done)
+            self.assertEqual(len(done), 6, done)  # incl. the informational 'Settings window opened' line
 
 
 if __name__ == "__main__":

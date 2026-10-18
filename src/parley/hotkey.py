@@ -29,6 +29,22 @@ def key_vk(key) -> int | None:
     return getattr(getattr(key, "value", key), "vk", None)
 
 
+def vk_to_name(vk: int) -> str | None:
+    """pynput-style key name for a Windows virtual-key code (what the config file takes), or None if there is none.
+    Left/right variants are preferred over the generic ctrl / shift / alt names; letters and digits are one character."""
+    from pynput import keyboard
+
+    best = None
+    for key in keyboard.Key:
+        if key_vk(key) != vk:
+            continue
+        if best is None or key.name.endswith(("_l", "_r")):
+            best = key.name
+    if best is None and (0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A):
+        best = chr(vk).lower()
+    return best
+
+
 class HotkeyListener:
     def __init__(self, app, key_name: str) -> None:
         self.app = app

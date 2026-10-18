@@ -344,7 +344,7 @@ class ConsoleLoopTests(unittest.TestCase):
 
         stop = threading.Event()
         with mock.patch.object(cli.hotkey, "HotkeyListener", FakeListener):
-            cli.run_hotkey_loop(object(), "pause", lambda: events.append("ready"), stop)
+            cli.run_hotkey_loop(SimpleNamespace(), "pause", lambda: events.append("ready"), stop)
         self.assertEqual(events, [("init", "pause"), "enter", "ready", ("wait", stop), "exit"])
 
     def test_plain_python_is_not_the_tray_exe(self):

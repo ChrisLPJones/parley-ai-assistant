@@ -55,8 +55,10 @@ class Speaker:
             self.synth("Ready.")
         log.info("Voice ready: %s on %s (%.1fs)", cfg.voice, session.get_providers()[0], time.perf_counter() - start)
 
-    def synth(self, text: str) -> np.ndarray:
-        samples, _rate = self.kokoro.create(text, voice=self.cfg.voice, speed=self.cfg.speed, lang=self.cfg.lang)
+    def synth(self, text: str, voice: str | None = None, speed: float | None = None, lang: str | None = None) -> np.ndarray:
+        """Speak `text` in the configured voice; the optional arguments override it for one call (voice samples)."""
+        samples, _rate = self.kokoro.create(text, voice=voice or self.cfg.voice, speed=speed or self.cfg.speed,
+                                            lang=lang or self.cfg.lang)
         return samples.astype(np.float32)
 
 

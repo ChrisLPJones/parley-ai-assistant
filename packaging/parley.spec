@@ -17,6 +17,7 @@ hidden = collect_submodules("parley") + [
     "pynput.keyboard._win32", "pynput.mouse._win32",  # chosen at run time by platform, not imported statically
     "win32com.shell.shell", "win32com.shell.shellcon", "pythoncom", "pywintypes",
     "win32gui", "win32cred", "win32api", "win32con", "win32event",  # tray window, credential store (also in --self-check)
+    "tkinter", "tkinter.ttk", "tkinter.font", "sv_ttk",  # the settings window (parley.ui, parley.settings_window)
 ]
 datas = []
 binaries = []
@@ -27,7 +28,8 @@ for pkg in ("faster_whisper",       # assets/silero_vad*.onnx
             "language_tags",
             "segments", "csvw", "babel", "tzdata",
             "certifi",              # httpx/anthropic CA bundle
-            "ddgs", "primp"):
+            "ddgs", "primp",
+            "sv_ttk"):              # sv.tcl + theme/ (the Windows 11 look of the settings window)
     try:
         datas += collect_data_files(pkg)
     except Exception:
@@ -37,7 +39,7 @@ datas += [(os.path.join(SRC, "parley", "cuda_pack.json"), "parley")]  # URL/sha2
 datas += collect_data_files("_sounddevice_data")  # PortAudio DLL lives here
 binaries += collect_dynamic_libs("_sounddevice_data")
 
-EXCLUDES = ["nvidia", "setuptools", "pkg_resources", "tkinter", "matplotlib", "IPython", "pytest", "PyQt5", "PyQt6", "PySide6"]
+EXCLUDES = ["nvidia", "setuptools", "pkg_resources", "matplotlib", "IPython", "pytest", "PyQt5", "PyQt6", "PySide6"]
 
 # espeak-ng voice *variants* (voices/!v/*: "+whisper", "+croak" ...) are never requested by Kokoro, and "!" is not a
 # character the update client's path rule accepts. The language voices (lang/, voices/ others) stay.

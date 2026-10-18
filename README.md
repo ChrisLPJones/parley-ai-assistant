@@ -73,6 +73,12 @@ removes the program but never your Parley data (`%LOCALAPPDATA%\parley`: models,
 Parley in the notification area (no console window; logs go to `%LOCALAPPDATA%\parley\logs\parley.log`). The installer and uninstaller
 ask you to close a running Parley first. Until the installer is published you run Parley from source.
 
+In the notification area, click the Parley icon (or choose Settings in its menu) to open the settings window: talk key (press
+a key to set it), microphone and speaker, beeps, Start with Windows (installed copies only), update checks, and the voice with
+speed and a sample. Most changes apply at once; the window says when one needs a restart and offers Restart now.
+Command-line use of an installed copy (`--ask`, `--list-devices`, `--self-check`, `--set-key`) goes through `parley-app.exe`
+(in `app\<version>\`), not `Parley.exe`, which has no console.
+
 Prerequisites:
 
 - Windows 10 or 11

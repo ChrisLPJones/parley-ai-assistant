@@ -151,6 +151,40 @@ if AVAILABLE:
         n = win32api.GetSystemMetrics(win32con.SM_CXSMICON)
         return n if n in tray_icons.SIZES else min(tray_icons.SIZES, key=lambda s: abs(s - n))
 
+    _dark_menu_state = {"warned": False}
+
+    def apply_menu_theme(hwnd: int) -> bool:
+        """Make the next popup menu follow Windows' app theme (dark or light), read NOW so a runtime change is honoured.
+
+        Uses undocumented uxtheme ordinals (135 SetPreferredAppMode / AllowDarkModeForApp, 136 FlushMenuThemes, 133
+        AllowDarkModeForWindow), only on Windows 10 build 18362 or later. Any problem (old build, missing ordinal, call
+        failure) leaves the normal light menu: logged once at debug level, never raised. Returns True if it was applied."""
+        try:
+            import sys
+
+            if sys.getwindowsversion().build < 18362:
+                return False
+            from . import ui
+
+            dark = not ui.system_uses_light_theme()
+            uxtheme = ctypes.WinDLL("uxtheme", use_last_error=True)
+            set_mode = uxtheme[135]
+            set_mode.argtypes, set_mode.restype = [ctypes.c_int], ctypes.c_int
+            flush = uxtheme[136]
+            flush.argtypes, flush.restype = [], None
+            set_mode(2 if dark else 0)  # ForceDark / Default (on build 18362 the argument is a BOOL: same values)
+            if dark:
+                allow = uxtheme[133]
+                allow.argtypes, allow.restype = [ctypes.c_void_p, ctypes.c_int], ctypes.c_int
+                allow(hwnd, 1)
+            flush()
+            return dark
+        except Exception as e:  # noqa: BLE001 - cosmetic; the light menu is the fallback
+            if not _dark_menu_state["warned"]:
+                _dark_menu_state["warned"] = True
+                log.debug("Dark popup menu unavailable (%s); using the light menu", e)
+            return False
+
     class Tray:
         def __init__(self, on_menu_command: Callable[[str], None] | None = None, *,
                      on_activate: Callable[[], None] | None = None, tooltip: str = "Parley",
@@ -417,6 +451,7 @@ if AVAILABLE:
         def _show_menu(self) -> None:
             if not self._model:
                 return
+            apply_menu_theme(self._hwnd)
             menu = win32gui.CreatePopupMenu()
             try:
                 for cid, item in self._model:
@@ -426,7 +461,10 @@ if AVAILABLE:
                         flags = win32con.MF_STRING | (0 if item.enabled else win32con.MF_GRAYED | win32con.MF_DISABLED)
                         win32gui.AppendMenu(menu, flags, cid, item.label)
                 x, y = win32gui.GetCursorPos()
-                win32gui.SetForegroundWindow(self._hwnd)  # else the menu will not close on outside click
+                try:
+                    win32gui.SetForegroundWindow(self._hwnd)  # else the menu will not close on outside click
+                except Exception:
+                    pass  # Windows refuses it when we are not the foreground process; the menu still shows
                 cmd = win32gui.TrackPopupMenu(
                     menu, win32con.TPM_RETURNCMD | win32con.TPM_NONOTIFY | win32con.TPM_RIGHTBUTTON,
                     x, y, 0, self._hwnd, None,
