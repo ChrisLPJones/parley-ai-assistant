@@ -33,7 +33,7 @@ See the [usage guide](docs/USAGE.md) for details.
 ## Install on Windows
 
 1. Download `Parley-Setup-<version>.exe` from the
-   [latest release](https://github.com/ChrisLPJones/parley/releases/latest).
+   [latest release](https://github.com/ChrisLPJones/parley-ai-assistant/releases/latest).
 2. Run it. It installs for your user only (no administrator rights) to `%LOCALAPPDATA%\Programs\Parley`
    and adds a Start menu entry.
 3. The installer is **not code-signed yet**, so Windows SmartScreen shows "Windows protected your PC".
@@ -54,8 +54,8 @@ Logs are in `%LOCALAPPDATA%\parley\logs\parley.log`.
 Needs Windows 10 or 11, [uv](https://docs.astral.sh/uv/) and a microphone.
 
 ```sh
-git clone https://github.com/ChrisLPJones/parley
-cd parley
+git clone https://github.com/ChrisLPJones/parley-ai-assistant
+cd parley-ai-assistant
 uv run parley
 ```
 
@@ -69,8 +69,8 @@ Linux support has not been tested. Nothing here is known to work. To try it from
 
 ```sh
 # Ubuntu: sudo apt install libportaudio2      Fedora: sudo dnf install portaudio
-git clone https://github.com/ChrisLPJones/parley
-cd parley
+git clone https://github.com/ChrisLPJones/parley-ai-assistant
+cd parley-ai-assistant
 uv run parley
 ```
 
@@ -114,7 +114,7 @@ secrets (SSH keys, `.env`, credential stores) are off limits.
 
 ## Contributing and issues
 
-Bug reports and ideas are welcome as [GitHub issues](https://github.com/ChrisLPJones/parley/issues).
+Bug reports and ideas are welcome as [GitHub issues](https://github.com/ChrisLPJones/parley-ai-assistant/issues).
 Please include the relevant lines from `parley.log` (check them for anything private first).
 
 ## Licence
