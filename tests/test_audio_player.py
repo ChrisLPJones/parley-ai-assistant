@@ -83,6 +83,19 @@ class PlayerTests(unittest.TestCase):
         self.assertEqual(t[0], 0.0)
         self.assertLess(abs(t[-1]), 0.01)
 
+    def test_pop_beeps_are_soft_whole_and_differ_in_pitch(self):
+        def crossings(x):
+            return int(np.sum(np.signbit(x[:-1]) != np.signbit(x[1:])))
+
+        start, stop = audio.start_beep(), audio.stop_beep()
+        for b in (start, stop):
+            self.assertEqual(len(b), audio.SPEAKER_RATE * 80 // 1000)
+            self.assertLess(abs(b[0]), 0.001)
+            self.assertLess(abs(b[-1]), 0.001)
+            self.assertLessEqual(float(np.max(np.abs(b))), 0.25)
+            self.assertTrue(np.all(np.isfinite(b)))
+        self.assertGreater(crossings(start), crossings(stop))
+
 
 if __name__ == "__main__":
     unittest.main()

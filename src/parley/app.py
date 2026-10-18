@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from . import cuda_pack, gpu, settings_schema
-from .audio import MIC_RATE, Player, Recorder, tone
+from .audio import MIC_RATE, Player, Recorder, start_beep, stop_beep
 from .config import Config, app_dir
 from .llm import CLOUD_BACKENDS, create as create_chat
 from .stt import Transcriber
@@ -286,14 +286,14 @@ class Parley:
         self.turn += 1  # cuts off anything still being said or generated
         self.recorder.start()
         if self.cfg.audio.sounds:
-            self.player.play(self.turn, tone(880))
+            self.player.play(self.turn, start_beep())
 
     def end_listening(self) -> None:
         if not self.recorder.recording:
             return
         audio = self.recorder.stop()
         if self.cfg.audio.sounds:
-            self.player.play(self.turn, tone(660))
+            self.player.play(self.turn, stop_beep())
         self._jobs.put((self.turn, audio, time.perf_counter()))
 
     def ask(self, text: str) -> int:

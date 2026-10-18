@@ -74,6 +74,22 @@ def tone(freq: float, ms: int = 60, volume: float = 0.15) -> np.ndarray:
     return (np.sin(2 * np.pi * freq * t) * fade * volume).astype(np.float32)
 
 
+def pop(freq: float, ms: int = 80, decay: float = 0.03, volume: float = 0.22) -> np.ndarray:
+    """A soft rounded blip: sine with a 4 ms attack, exponential decay and a 10 ms release (no clicks)."""
+    n = int(SPEAKER_RATE * ms / 1000)
+    t = np.arange(n) / SPEAKER_RATE
+    env = np.minimum(1, t / 0.004) * np.exp(-t / decay) * np.minimum(1, (n - 1 - np.arange(n)) / SPEAKER_RATE / 0.01)
+    return (np.sin(2 * np.pi * freq * t) * env * volume).astype(np.float32)
+
+
+def start_beep() -> np.ndarray:
+    return pop(520)
+
+
+def stop_beep() -> np.ndarray:
+    return pop(390)
+
+
 class Player:
     """Plays queued clips back to back. Clips tagged with a stale turn id are dropped,
     and the clip playing is cut off within ~50ms when its turn becomes stale."""
