@@ -18,6 +18,7 @@ _parse_key = hotkey.parse_key  # kept for callers and tests that import it from 
 
 def run_hotkey_loop(app, key_name: str, on_ready=None, stop: threading.Event | None = None) -> None:
     with hotkey.HotkeyListener(app, key_name) as hl:
+        app.hotkey = hl
         logging.info("Ready. Hold [%s] and speak; release to send. Ctrl+C to quit.", key_name)
         if on_ready:
             on_ready()
@@ -38,7 +39,8 @@ def _disable_console_quick_edit() -> None:
         k32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)  # -QUICK_EDIT, +EXTENDED_FLAGS
 
 
-SELF_CHECK_MODULES = ("tray", "tray_icons", "instance", "logsetup", "hotkey", "credstore", "config_io")
+SELF_CHECK_MODULES = ("tray", "tray_icons", "instance", "logsetup", "hotkey", "credstore", "config_io", "ui", "settings_window",
+                      "autostart", "voices")
 
 
 def self_check(config_path: Path | None = None) -> int:
@@ -65,11 +67,22 @@ def self_check(config_path: Path | None = None) -> int:
     for mod in SELF_CHECK_MODULES:
         attempt(f"module parley.{mod}", lambda n=mod: importlib.import_module(f"parley.{n}"))
     libs = ["pynput.keyboard", "sounddevice", "numpy", "httpx", "faster_whisper", "ctranslate2", "onnxruntime",
-            "kokoro_onnx", "tomlkit"]
+            "kokoro_onnx", "tomlkit", "tkinter", "sv_ttk"]
     if sys.platform == "win32":
         libs += ["win32gui", "win32cred", "win32api", "win32con", "win32event"]  # pywin32: tray window, credential store
     for lib in libs:
         attempt(f"library {lib}", lambda n=lib: importlib.import_module(n))
+
+    def tk_files() -> None:  # Tcl itself starts (no display needed) and the theme's files were bundled
+        import tkinter
+
+        from sv_ttk import TCL_THEME_FILE_PATH
+
+        tkinter.Tcl().eval("expr 1+1")
+        if not Path(TCL_THEME_FILE_PATH).is_file():
+            raise FileNotFoundError("sv_ttk theme file missing")
+
+    attempt("tkinter / sv_ttk files", tk_files)
     if problems:
         print(f"parley {__version__} self-check FAILED: {', '.join(problems)}", file=sys.stderr)
         return 1

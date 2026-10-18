@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import config, credstore, download, instance, logsetup, tray
+from . import config, credstore, download, instance, logsetup, tray, ui
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ SMOKE_TIMEOUT_S = 300.0
 MAX_ERROR_CHARS = 200
 DEBOUNCE_S = 0.15
 POLL_S = 0.1
+SETTINGS_DEBOUNCE_S = 1.5  # one click (or double click) = one request; the window itself is idempotent anyway
 WELCOME_MARK = "tray_welcomed"
 _faulthandler_file = None  # kept open for the life of the process
 
@@ -146,6 +147,12 @@ class TrayApp:
         self.welcome_dir = welcome_dir or self.home
         self.tray = tray_factory(on_activate=threaded(self.open_settings, "activate"),
                                  on_open_settings=threaded(self.open_settings, "open-settings"))
+        from . import settings_window  # tkinter: imported only when the tray app exists, never for the console loop
+
+        self.settings_host = settings_window.Host(
+            args.config or config.default_config_path(),
+            get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
+            get_hotkey=lambda: self.hotkey, on_applied=self._on_applied)
         self.app = self.flow = self.hotkey = None
         self.key_name = "pause"
         self.quit_event = threading.Event()
@@ -156,6 +163,7 @@ class TrayApp:
         self._download: tuple[str, int] | None = None  # (file name, percent or -1)
         self._ready = False
         self._lock = threading.Lock()
+        self._last_settings = float("-inf")  # monotonic time of the last accepted Settings request
 
     # ---- life cycle ----
     def run(self) -> int:
@@ -186,8 +194,8 @@ class TrayApp:
         if not asked and not self.exit_code:
             log.error("The tray window could not be created")
             self.exit_code = 1
-        if self.restarting and self.flow is not None:
-            self.flow.restart()  # an update was installed: the launcher starts the new version
+        if self.restarting:
+            self._relaunch()  # an update was installed, or the user chose Restart now in Settings
         return self.exit_code
 
     def request_quit(self) -> None:
@@ -197,6 +205,7 @@ class TrayApp:
     def shutdown(self) -> None:
         self.quit_event.set()
         download.set_observer(None)
+        ui.stop()  # closes the settings window; Tk is destroyed on its own thread
         for stop in (getattr(self.hotkey, "stop", None), getattr(self.flow, "stop", None)):
             if stop:
                 try:
@@ -217,6 +226,7 @@ class TrayApp:
             app = Parley(cfg, use_mic=True)
             hotkey = HotkeyListener(app, cfg.hotkey.key)
             hotkey.start()
+            app.hotkey = hotkey  # Settings re-points it when the talk key changes
             self.app, self.hotkey = app, hotkey
             self.flow = self.create_flow(app, cfg)
         except SystemExit as e:  # a config or setup mistake the user can fix: stay alive and say so
@@ -334,9 +344,49 @@ class TrayApp:
         ))
 
     def open_settings(self) -> None:
+        """Menu 'Settings', a left click on the icon, or a second launch's request: open the window or focus the open one."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_settings < SETTINGS_DEBOUNCE_S:
+                log.debug("Settings request ignored (repeat within %.1f s)", SETTINGS_DEBOUNCE_S)
+                return
+            self._last_settings = now
         log.info("Settings requested")
-        # The settings window arrives in a later change; until then say so (also for a second launch's request)
-        self.tray.balloon("Parley", "Settings are coming in a later version. For now edit config.toml.")
+        from . import settings_window
+
+        if not settings_window.open_settings(self.settings_host):
+            self.tray.balloon("Parley", "The settings window could not start. Edit config.toml for now.")
+
+    def _on_applied(self, cfg) -> None:
+        """Settings were applied to the running app: keep the tray's key name (tooltip, status line) in step."""
+        self.key_name = cfg.hotkey.key
+        self._refresh_menu()
+
+    def restart_app(self) -> None:
+        """'Restart now' in Settings: quit, then start a fresh copy (it waits for this one's instance lock)."""
+        self.restarting = True
+        self.request_quit()
+
+    def _relaunch(self) -> None:
+        if self.flow is not None:
+            self.flow.restart()
+            return
+        from . import autoupdate
+
+        args = [a for a in sys.argv[1:] if a != autoupdate.RESTARTED_FLAG]
+        root = autoupdate.install_root()
+        if root is not None:
+            autoupdate.spawn_launcher(root, [*args, autoupdate.RESTARTED_FLAG])
+            return
+        if "--tray" not in args:
+            args.append("--tray")
+        import subprocess
+
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            subprocess.Popen([sys.executable, "-m", "parley", *args, autoupdate.RESTARTED_FLAG], close_fds=True, creationflags=flags)
+        except OSError as e:
+            log.warning("Cannot restart: %s", e)
 
     def check_updates(self) -> None:
         if self.flow is not None:

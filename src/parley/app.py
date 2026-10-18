@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import cuda_pack, gpu
+from . import cuda_pack, gpu, settings_schema
 from .audio import MIC_RATE, Player, Recorder, tone
 from .config import Config, app_dir
 from .llm import CLOUD_BACKENDS, create as create_chat
@@ -39,6 +39,7 @@ class Parley:
         self._jobs: queue.Queue[tuple[int, np.ndarray | str, float]] = queue.Queue()
         self._sentences: queue.Queue[tuple[int, str | None, float]] = queue.Queue()
         self.finished = threading.Event()  # set once a turn's answer has been fully played
+        self._init_apply_state()
 
         home = app_dir()
         log.info("Hardware: %s", gpu.describe())
@@ -74,6 +75,16 @@ class Parley:
         except BaseException as e:  # incl. SystemExit for config errors, re-raised on the main thread
             self._llm_error = e
 
+    def _init_apply_state(self) -> None:
+        """State for the settings window (also used directly by tests that build a Parley without loading models)."""
+        self.hotkey = None  # the HotkeyListener, set by whoever runs it (tray mode, console loop); Settings re-points it
+        self._previewing = False  # a voice sample is being synthesized (counts as busy)
+        self._apply_lock = threading.Lock()
+        self._restart_paths: set[str] = set()  # saved settings that only a restart applies
+        self.deferred: list[str] = []  # settings waiting for the current answer to finish
+        self._pending: dict = {"hotkey": None, "audio": {}}  # wanted hotkey / audio-device changes not applied yet
+        self._watching = False  # the thread that applies them after the answer is running
+
     def is_current(self, turn: int) -> bool:
         return turn == self.turn
 
@@ -81,7 +92,8 @@ class Parley:
         """True while a question is being recorded, transcribed, answered or spoken (used to hold back updates).
         The queues' unfinished counts also cover an item a worker has taken but not finished."""
         recording = self.recorder is not None and self.recorder.recording
-        return recording or any(q.unfinished_tasks for q in (self._jobs, self._sentences, self.player.queue))
+        return (recording or getattr(self, "_previewing", False)
+                or any(q.unfinished_tasks for q in (self._jobs, self._sentences, self.player.queue)))
 
     def activity(self) -> str:
         """idle | listening | thinking | speaking (cheap, safe to poll from any thread). The tray debounces it, since
@@ -93,6 +105,170 @@ class Parley:
     def say(self, text: str) -> None:
         """Speak a short notice of our own (e.g. about updates). Dropped if the user starts a question meanwhile."""
         self._sentences.put((self.turn, text, time.perf_counter()))
+
+    # --- settings window (any thread) ---
+
+    def voices(self) -> list[str]:
+        """Voice names the installed Kokoro model offers."""
+        return sorted(self.speaker.kokoro.get_voices())
+
+    def preview_voice(self, voice: str, speed: float, text: str) -> bool:
+        """Say `text` in `voice` at `speed` without saving anything. False if Parley is busy; raises ValueError for a
+        voice or speed that isn't acceptable. Runs on a worker thread; a hotkey press cuts it off (turn counter)."""
+        speed = settings_schema.validate("tts.speed", speed)
+        if voice not in self.voices():
+            raise ValueError("That voice isn't installed.")
+        text = text.strip()[:300]
+        if not text:
+            return False
+        with self._apply_lock:
+            if self.is_busy():
+                return False
+            self._previewing = True
+        turn = self.turn  # a key press bumps it, which drops the sample at once
+
+        def work() -> None:
+            try:
+                audio = self.speaker.synth(text, voice=voice, speed=speed,
+                                           lang=settings_schema.voice_lang(voice) or self.cfg.tts.lang)
+                if self.is_current(turn):
+                    self.player.play(turn, audio)
+            except Exception:
+                log.exception("Voice sample failed")
+            finally:
+                self._previewing = False  # the clip is queued by now: the player's queue keeps is_busy() true
+
+        threading.Thread(target=work, daemon=True, name="voice-sample").start()
+        return True
+
+    def restart_pending(self) -> list[str]:
+        """Setting paths whose saved value only a restart will apply."""
+        return sorted(self._restart_paths)
+
+    def apply_config(self, new: Config) -> tuple[list[str], list[str]]:
+        """Make a saved config take effect. Returns (applied, needs_restart) as setting paths.
+
+        The shared sub-dataclasses are changed IN PLACE (Speaker, Chat and the providers hold references to them), so
+        `live` settings are seen at their next use. `hotkey` and `swap_audio` settings are applied while Parley is idle;
+        during an answer they wait (`self.deferred`) and apply right after it. Restart-only settings (and the ones
+        whose machinery lands in a later change: the language-model backend and tools) are NOT written into the running
+        config, so the difference stays visible and Settings keeps offering "Restart now". `llm.api_key` is never handled
+        here: keys live in the credential store only.
+        """
+        S = settings_schema
+        applied, restart = [], []
+        hotkey_new, audio_new = None, {}
+        with self._apply_lock:
+            for s in S.SETTINGS:
+                if s.path == "llm.api_key":
+                    continue
+                table, key = s.path.split(".")
+                old_v, new_v = getattr(getattr(self.cfg, table), key), getattr(getattr(new, table), key)
+                if old_v == new_v:
+                    self._restart_paths.discard(s.path)  # edited back to what is running
+                    continue
+                if s.apply in (S.LIVE, S.NEXT_LAUNCH):
+                    setattr(getattr(self.cfg, table), key, new_v)
+                    applied.append(s.path)
+                elif s.apply == S.HOTKEY:
+                    hotkey_new = new_v
+                elif s.apply == S.SWAP_AUDIO:
+                    audio_new[s.path] = new_v
+                else:  # RESTART, and REBUILD_CHAT / RELOAD_LLM until their machinery exists
+                    self._restart_paths.add(s.path)
+                    restart.append(s.path)
+            self._pending = {"hotkey": hotkey_new, "audio": audio_new}  # replaces an older wait: this is what's wanted now
+            a, r = self._apply_idle_changes()
+        return applied + a, restart + r
+
+    def _apply_idle_changes(self) -> tuple[list[str], list[str]]:
+        """Apply the wanted hotkey / audio-device changes if Parley is idle, else wait for the end of the answer
+        (`self.deferred` names them). Call with `_apply_lock` held."""
+        hotkey_new, audio_new = self._pending["hotkey"], self._pending["audio"]
+        if not hotkey_new and not audio_new:
+            self.deferred = []
+            return [], []
+        if self.is_busy():
+            self.deferred = (["hotkey.key"] if hotkey_new else []) + sorted(audio_new)
+            if not self._watching:
+                self._watching = True
+                threading.Thread(target=self._apply_when_idle, daemon=True, name="apply-config").start()
+            return [], []
+        applied, restart = [], []
+        if hotkey_new:
+            try:
+                if self.hotkey is None:
+                    raise SystemExit("no hotkey listener")
+                self.hotkey.set_key(hotkey_new)
+                self.cfg.hotkey.key = hotkey_new
+                applied.append("hotkey.key")
+            except SystemExit as e:
+                log.warning("Hotkey not changed (%s); restart Parley to use it", e)
+                restart.append("hotkey.key")
+        if audio_new:
+            if self._swap_audio(audio_new):
+                applied += sorted(audio_new)
+            else:
+                restart += sorted(audio_new)
+        self._restart_paths.update(restart)
+        self._pending, self.deferred = {"hotkey": None, "audio": {}}, []
+        return applied, restart
+
+    def _apply_when_idle(self) -> None:
+        while True:
+            time.sleep(0.25)
+            with self._apply_lock:
+                if not self.deferred:  # a later save replaced or cleared the wait
+                    self._watching = False
+                    return
+                if self.is_busy():
+                    continue
+                applied, restart = self._apply_idle_changes()
+                self._watching = False
+            log.info("Applied after the answer: %s%s", applied, f"; restart needed for {restart}" if restart else "")
+            return
+
+    def _make_recorder(self, device, preroll_ms: int) -> Recorder:
+        return Recorder(device, preroll_ms)
+
+    def _make_player(self, device) -> Player:
+        return Player(device, is_current=lambda t: t == self.turn)
+
+    def _swap_audio(self, changes: dict) -> bool:
+        """Build the new microphone / speaker first; only when that worked replace the old ones and close them.
+        On any failure the old devices keep running and False is returned (the caller reports a restart)."""
+        audio = self.cfg.audio
+        rec = player = None
+        try:
+            if self.recorder is not None and ({"audio.input_device", "audio.preroll_ms"} & changes.keys()):
+                rec = self._make_recorder(changes.get("audio.input_device", audio.input_device),
+                                          changes.get("audio.preroll_ms", audio.preroll_ms))
+            if "audio.output_device" in changes:
+                player = self._make_player(changes["audio.output_device"])
+        except Exception as e:
+            log.warning("Could not switch the audio device (%s); restart Parley to use it", e)
+            for made in (rec, player):
+                if made is not None:
+                    try:
+                        made.close()
+                    except Exception:
+                        pass
+            return False
+        old = []
+        if rec is not None:
+            old.append(self.recorder)
+            self.recorder = rec
+        if player is not None:
+            old.append(self.player)
+            self.player = player
+        for o in old:
+            try:
+                o.close()
+            except Exception:
+                log.debug("Closing the old audio device failed", exc_info=True)
+        for path, value in changes.items():
+            setattr(audio, path.split(".")[1], value)
+        return True
 
     # --- hotkey events (called from the keyboard hook thread; keep them quick) ---
 

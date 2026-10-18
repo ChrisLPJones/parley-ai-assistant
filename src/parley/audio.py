@@ -49,6 +49,14 @@ class Recorder:
     def recording(self) -> bool:
         return self._chunks is not None
 
+    def close(self) -> None:
+        """Stop and release the microphone (used when the device is swapped from Settings)."""
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            log.debug("Closing the input stream failed", exc_info=True)
+
     def start(self) -> None:
         with self._lock:
             self._chunks = list(self._preroll)
@@ -84,10 +92,21 @@ class Player:
     def play(self, turn: int, samples: np.ndarray, on_start: Callable | None = None) -> None:
         self.queue.put((turn, samples, on_start))
 
+    def close(self) -> None:
+        """Stop the playback thread and release the speaker (used when the device is swapped from Settings)."""
+        self.queue.put((-1, None, None))  # sentinel: the worker leaves and closes the stream
+
     def _run(self) -> None:
         while True:
             turn, samples, on_start = self.queue.get()
             try:
+                if samples is None:
+                    try:
+                        self._stream.stop()
+                        self._stream.close()
+                    except Exception:
+                        log.debug("Closing the output stream failed", exc_info=True)
+                    return
                 if not self._is_current(turn):
                     continue
                 if on_start:

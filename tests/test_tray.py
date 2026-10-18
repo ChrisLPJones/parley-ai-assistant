@@ -108,5 +108,49 @@ class RealTrayTests(unittest.TestCase):
         self.assertFalse(t.visible)
 
 
+@unittest.skipUnless(sys.platform == "win32" and tray.AVAILABLE, "Windows tray")
+class DarkMenuTests(unittest.TestCase):
+    def test_old_windows_build_does_nothing(self):
+        from unittest import mock
+
+        with mock.patch.object(sys, "getwindowsversion", return_value=mock.Mock(build=17763)),                 mock.patch("ctypes.WinDLL") as dll:
+            self.assertFalse(tray.apply_menu_theme(0))
+        dll.assert_not_called()
+
+    def test_failures_fall_back_silently(self):
+        from unittest import mock
+
+        tray._dark_menu_state["warned"] = False
+        with mock.patch("ctypes.WinDLL", side_effect=OSError("no uxtheme")):
+            self.assertFalse(tray.apply_menu_theme(0))  # no exception
+            self.assertFalse(tray.apply_menu_theme(0))
+        self.assertTrue(tray._dark_menu_state["warned"])
+
+    def test_missing_ordinal_falls_back(self):
+        from unittest import mock
+
+        class NoOrdinals:
+            def __getitem__(self, i):
+                raise AttributeError("function not found")
+
+        with mock.patch("ctypes.WinDLL", return_value=NoOrdinals()):
+            self.assertFalse(tray.apply_menu_theme(0))
+
+    def test_follows_the_theme_read_at_call_time(self):
+        from unittest import mock
+
+        from parley import ui
+
+        fn = mock.Mock(return_value=0)
+        dll = {135: fn, 136: mock.Mock(), 133: mock.Mock()}
+        with mock.patch("ctypes.WinDLL", return_value=dll),                 mock.patch.object(sys, "getwindowsversion", return_value=mock.Mock(build=22631)):
+            with mock.patch.object(ui, "system_uses_light_theme", return_value=False):
+                self.assertTrue(tray.apply_menu_theme(5))
+            fn.assert_called_with(2)  # ForceDark
+            with mock.patch.object(ui, "system_uses_light_theme", return_value=True):
+                self.assertFalse(tray.apply_menu_theme(5))
+            fn.assert_called_with(0)  # Default (light)
+
+
 if __name__ == "__main__":
     unittest.main()

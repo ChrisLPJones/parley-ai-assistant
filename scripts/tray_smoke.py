@@ -195,6 +195,19 @@ def run_tray_smoke(exe: Path, home: Path, *, timeout: float = 90.0, env: dict[st
         if proc.poll() is not None or not win32gui.IsWindow(hwnd):
             raise SmokeError("the first instance did not survive the second launch")
         done.append("second launch exited 0 and asked the first instance to open Settings")
+        # The Settings window itself (needs a desktop for Tk): reported, not required, so a runner without one still passes.
+        # A build that lost tkinter fails --self-check instead.
+        def settings_outcome():
+            text = log.read_text("utf-8", "replace")
+            if "Settings window opened" in text:
+                return "opened"
+            return "no display" if "settings UI could not start" in text else None
+
+        try:
+            outcome = _wait(settings_outcome, 20, "the Settings window", proc)
+        except SmokeError:
+            outcome = "no answer"
+        done.append("Settings window opened" if outcome == "opened" else f"Settings window not opened ({outcome}); not required")
 
         seen.update(tree_pids(proc.pid))
         win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
