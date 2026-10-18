@@ -316,9 +316,12 @@ def _size_words(n: int) -> str:
 
 
 def maybe_download(cfg, plan, home: Path, say: Callable[[str], None] | None = None, *,
-                   frozen: bool | None = None, manifest: Manifest | None = None, open_stream: Callable | None = None) -> bool:
+                   frozen: bool | None = None, manifest: Manifest | None = None, open_stream: Callable | None = None,
+                   on_installed: Callable[[], None] | None = None) -> bool:
     """Fetch the pack if this is a packaged copy on an NVIDIA machine that would use it and doesn't have it.
-    Never raises; True only when a new pack was installed. Blocking: run it in a thread (`start_background`)."""
+    Never raises; True only when a new pack was installed. Blocking: run it in a thread (`start_background`).
+    `on_installed` (tray mode) is called once after a FRESH install, never when the pack was already there; the caller
+    then restarts Parley so the models load on the GPU, and the spoken notice says so."""
     try:
         if not (is_frozen() if frozen is None else frozen) or not needed(cfg, plan):
             return False
@@ -335,7 +338,13 @@ def maybe_download(cfg, plan, home: Path, say: Callable[[str], None] | None = No
         install(m, home, open_stream or make_opener(), on_start=announce)
         log.info("GPU support installed in %s; it is used from the next start", pack_dir(home))
         if say:
-            say("GPU support is ready. Parley will use it the next time it starts.")
+            say("GPU support is ready. Parley will restart in a moment to use it." if on_installed
+                else "GPU support is ready. Parley will use it the next time it starts.")
+        if on_installed:
+            try:
+                on_installed()
+            except Exception:
+                log.exception("GPU support restart hook failed")
         return True
     except PackError as e:
         log.warning("GPU support not installed: %s. Parley stays on the CPU and will try again next start", e)
@@ -346,10 +355,12 @@ def maybe_download(cfg, plan, home: Path, say: Callable[[str], None] | None = No
     return False
 
 
-def start_background(cfg, plan, home: Path, say: Callable[[str], None] | None = None) -> threading.Thread | None:
+def start_background(cfg, plan, home: Path, say: Callable[[str], None] | None = None,
+                     on_installed: Callable[[], None] | None = None) -> threading.Thread | None:
     """Run `maybe_download` in a daemon thread when it could do anything; None otherwise."""
     if not (is_frozen() and needed(cfg, plan)):
         return None
-    t = threading.Thread(target=maybe_download, args=(cfg, plan, home, say), daemon=True, name="cuda-pack")
+    t = threading.Thread(target=maybe_download, args=(cfg, plan, home, say), kwargs={"on_installed": on_installed},
+                         daemon=True, name="cuda-pack")
     t.start()
     return t

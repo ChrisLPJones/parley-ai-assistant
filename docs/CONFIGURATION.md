@@ -31,7 +31,7 @@ To remove everything, delete this folder (and the cloned repo, if you ran from s
 | `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
 | `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search |
 | `[tts]` | `voice`, `speed`, `device` | Kokoro voice, speed, and `auto`/`cuda`/`cpu` |
-| `[gpu]` | `download_cuda` | Packaged copies only (default `true`): download the CUDA libraries (about 1.6 GB, once) on an NVIDIA GPU; the CPU is used until they are ready |
+| `[gpu]` | `download_cuda` | Packaged copies only (default `true`): download the CUDA libraries (about 1.6 GB, once) on an NVIDIA GPU; the CPU is used until they are ready, then Parley restarts itself once, when idle, to use the GPU |
 | `[updates]` | `check` | Installed copies only (default `true`): look for a newer version after startup and ask before installing; a source checkout never updates itself. The update server is fixed at build time, not configurable |
 
 ## Cloud backends

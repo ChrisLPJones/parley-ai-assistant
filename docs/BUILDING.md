@@ -36,7 +36,8 @@ so Windows SmartScreen will warn. Silent install for testing: `Parley-Setup-<ver
 
 On an NVIDIA GPU the built copy downloads the CUDA 12 libraries (cuBLAS, cuDNN, cuFFT, CUDA
 runtime; 6 pinned wheels, about 1.6 GB) once, in the background, on the first run: Parley says so, keeps working on the
-CPU meanwhile, and uses the GPU from the next start. They go to `runtime\cuda12\` in the Parley home, so app updates keep
+CPU meanwhile. When the download is verified, the tray app restarts itself once, as soon as it is idle (not while you are
+talking or it is answering), so the models come up on the GPU; it is not restarted again on later starts. They go to `runtime\cuda12\` in the Parley home, so app updates keep
 them. `scripts/cuda_pack.py` writes `src/parley/cuda_pack.json` (URL, sha256 and size of each wheel, straight from `uv.lock`;
 `build.py` refreshes it, and a test fails if the committed copy differs). Downloads are checked against that hash and
 size, only from `files.pythonhosted.org`; only the listed DLLs are unpacked. If the download fails (offline, disk full,

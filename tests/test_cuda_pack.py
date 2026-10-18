@@ -419,6 +419,34 @@ class Gating(Fixture):
         self.assertIn("Parley will use the CPU until it is done.", said[0])
         self.assertIn("next time", said[1])
 
+    def test_on_installed_runs_after_a_fresh_install_only(self):
+        m, said, hook = self.manifest(), [], []
+        self.assertTrue(cuda_pack.maybe_download(self.cfg(), CUDA_PLAN, self.home, said.append, frozen=True, manifest=m,
+                                                 open_stream=self.opener, on_installed=lambda: hook.append(1)))
+        self.assertEqual(hook, [1])
+        self.assertIn("restart", said[-1])
+        self.assertNotIn("next time", said[-1])
+        self.assertFalse(cuda_pack.maybe_download(self.cfg(), CUDA_PLAN, self.home, frozen=True, manifest=m,
+                                                  open_stream=self.never_opener, on_installed=lambda: hook.append(2)))
+        self.assertEqual(hook, [1])  # already installed at startup: no restart
+
+    def test_on_installed_not_called_on_failure_or_when_disabled(self):
+        hook = []
+        with self.assertLogs("parley.cuda_pack", "WARNING"):
+            cuda_pack.maybe_download(self.cfg(), CUDA_PLAN, self.home, frozen=True,
+                                     manifest=self.manifest(tamper={"nvidia-cublas-cu12"}), open_stream=self.opener,
+                                     on_installed=lambda: hook.append(1))
+        cuda_pack.maybe_download(self.cfg(gpu__download_cuda=False), CUDA_PLAN, self.home, frozen=True,
+                                 manifest=self.manifest(), open_stream=self.never_opener, on_installed=lambda: hook.append(1))
+        self.assertEqual(hook, [])
+
+    def test_a_failing_hook_does_not_break_the_download(self):
+        def boom():
+            raise RuntimeError("x")
+        with self.assertLogs("parley.cuda_pack", "ERROR"):
+            self.assertTrue(cuda_pack.maybe_download(self.cfg(), CUDA_PLAN, self.home, frozen=True,
+                                                     manifest=self.manifest(), open_stream=self.opener, on_installed=boom))
+
     def test_failures_are_quiet_and_never_raise(self):
         m = self.manifest(tamper={"nvidia-cublas-cu12"})
         said = []

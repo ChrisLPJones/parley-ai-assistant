@@ -289,6 +289,187 @@ class TrayAppTests(ScratchHome):
         self.assertIn("Pause", balloons[0][2])
 
 
+class FakeApp:
+    """Stands in for Parley: a busy flag, a turn counter and the `speak_notice` / `finished` pair."""
+    def __init__(self) -> None:
+        self.turn, self.busy, self.spoken = 1, False, []
+        self.finished = threading.Event()
+
+    def is_busy(self): return self.busy
+
+    def speak_notice(self, sentences):
+        self.spoken.append(list(sentences))
+        self.finished.clear()
+        return self.turn
+
+
+class WelcomeTests(ScratchHome):
+    make = TrayAppTests.make
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(tray_mode, "IDLE_POLL_S", 0.01)
+        p.start()
+        self.addCleanup(p.stop)
+        self.app = self.make()
+        self.app.app = FakeApp()
+        self.mark = self.home / tray_mode.WELCOME_MARK
+
+    def test_spoken_with_key_name_settings_hint_and_marked_only_afterwards(self):
+        t = self.app._welcome()
+        time.sleep(0.2)
+        self.assertTrue(self.app._welcome_active.is_set())  # counts as busy while it plays
+        self.assertFalse(self.mark.exists())
+        text = " ".join(self.app.app.spoken[0])
+        self.assertIn("Pause", text)
+        self.assertIn("right-click the Parley icon", text)
+        self.assertIn("Settings", text)
+        self.assertIn("up arrow", text)
+        self.assertIn("interrupt", text)
+        self.assertIn(len(text.split()), range(40, 75))  # about 20 seconds
+        self.app.app.finished.set()
+        t.join(5)
+        self.assertTrue(self.mark.exists())
+        self.assertFalse(self.app._welcome_active.is_set())
+        balloons = [c for c in self.app.tray.calls if c[0] == "balloon"]
+        self.assertEqual(len(balloons), 1)  # the old balloon stays
+        self.assertIsNone(self.app._welcome())  # never again
+        self.assertEqual(len(self.app.app.spoken), 1)
+
+    def test_key_press_while_speaking_leaves_it_unmarked(self):
+        t = self.app._welcome()
+        time.sleep(0.2)
+        self.app.app.turn += 1  # the user pressed the talk key
+        t.join(5)
+        self.assertFalse(self.mark.exists())
+        self.assertFalse(self.app._welcome_active.is_set())
+
+    def test_key_press_before_it_starts_cancels_it(self):
+        self.app.app.busy = True
+        t = self.app._welcome()
+        time.sleep(0.1)
+        self.app.app.turn += 1
+        t.join(5)
+        self.assertEqual(self.app.app.spoken, [])
+        self.assertFalse(self.mark.exists())
+
+    def test_waits_until_idle_before_speaking(self):
+        self.app.app.busy = True
+        t = self.app._welcome()
+        time.sleep(0.1)
+        self.assertEqual(self.app.app.spoken, [])
+        self.app.app.busy = False
+        time.sleep(0.2)
+        self.assertEqual(len(self.app.app.spoken), 1)
+        self.app.app.finished.set()
+        t.join(5)
+
+    def test_without_a_speaker_it_is_the_balloon_alone(self):
+        self.app.app = None
+        self.assertIsNone(self.app._welcome())
+        self.assertTrue(self.mark.exists())
+
+
+class PackRestartTests(ScratchHome):
+    make = TrayAppTests.make
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(tray_mode, "IDLE_POLL_S", 0.01)
+        p.start()
+        self.addCleanup(p.stop)
+        self.app = self.make()
+        self.app.app, self.app._ready = FakeApp(), True
+        self.restarts = []
+        self.app.restart_app = lambda: self.restarts.append(1)
+        u = mock.patch("parley.cuda_pack.usable_dir", return_value=self.home)
+        self.usable = u.start()
+        self.addCleanup(u.stop)
+
+    def test_restarts_once_when_idle_with_a_balloon(self):
+        self.app._on_pack_ready()
+        self.app._on_pack_ready()
+        self.assertEqual(self.restarts, [1])
+        self.assertIn(("balloon", "Parley", "GPU libraries ready - restarting Parley"), self.app.tray.calls)
+
+    def test_waits_while_busy_or_welcoming(self):
+        self.app.app.busy = True
+        t = threading.Thread(target=self.app._on_pack_ready, daemon=True)
+        t.start()
+        time.sleep(0.15)
+        self.assertEqual(self.restarts, [])
+        self.app.app.busy = False
+        self.app._welcome_active.set()
+        time.sleep(0.15)
+        self.assertEqual(self.restarts, [])
+        self.app._welcome_active.clear()
+        t.join(5)
+        self.assertEqual(self.restarts, [1])
+
+    def test_no_restart_after_a_restart_or_without_a_usable_pack_or_when_quitting(self):
+        self.app.args.restarted = True  # loop guard
+        self.app._on_pack_ready()
+        self.app.args.restarted = False
+        self.usable.return_value = None
+        self.app._on_pack_ready()
+        self.usable.return_value = self.home
+        self.app.quit_event.set()
+        self.app._on_pack_ready()
+        self.assertEqual(self.restarts, [])
+
+
+class PackRestartExtraTests(PackRestartTests):
+    def test_busy_again_right_before_restart_goes_back_to_polling(self):
+        calls = {"n": 0}
+        app = self.app.app
+
+        def busy():  # idle for the 3 polls, busy at the final look, then idle again
+            calls["n"] += 1
+            return calls["n"] == 4
+        app.is_busy = busy
+        self.app._on_pack_ready()
+        self.assertEqual(self.restarts, [1])
+        self.assertGreater(calls["n"], 7)  # the busy look reset the count: 3 more idle polls + final look
+
+    def _boot_with(self, restarted):
+        self.app.args.restarted = restarted
+        seen = {}
+
+        class P:
+            def __init__(me, cfg, use_mic=True, on_pack_ready=None):
+                seen["hook"] = on_pack_ready
+                raise SystemExit("stop here")
+        with mock.patch("parley.app.Parley", P), mock.patch("parley.config.load", return_value=SimpleNamespace(
+                hotkey=SimpleNamespace(key="pause"))), mock.patch("parley.credstore.migrate_legacy_key"):
+            self.app._boot()
+        return seen["hook"]
+
+    def test_boot_wires_the_hook_only_when_not_restarted(self):
+        self.assertEqual(self._boot_with(False), self.app._on_pack_ready)
+        self.assertIsNone(self._boot_with(True))
+
+    def test_wording_differs_without_the_hook(self):
+        from parley import cuda_pack
+        said = {}
+        for name, hook in (("with", lambda: None), ("without", None)):
+            lines = []
+            with tempfile.TemporaryDirectory(prefix="parley_test_wording_") as d,                     mock.patch.object(cuda_pack, "install"), mock.patch.object(cuda_pack, "load_manifest"),                     mock.patch.object(cuda_pack, "usable_dir", return_value=None),                     mock.patch.object(cuda_pack, "needed", return_value=True):
+                cuda_pack.maybe_download(None, None, Path(d), lines.append, frozen=True, on_installed=hook)
+            said[name] = lines[-1]
+        self.assertIn("restart in a moment", said["with"])
+        self.assertIn("next time it starts", said["without"])
+
+
+class SpeakNoticeTests(unittest.TestCase):
+    def test_queues_the_sentences_then_the_end_marker_in_one_turn(self):
+        import queue
+        p = object.__new__(Parley)
+        p.turn, p._sentences, p.finished = 7, queue.Queue(), threading.Event()
+        p.finished.set()
+        self.assertEqual(p.speak_notice(["A.", "B."]), 7)
+        self.assertFalse(p.finished.is_set())
+        items = [p._sentences.get_nowait() for _ in range(3)]
+        self.assertEqual([(t, s) for t, s, _ in items], [(7, "A."), (7, "B."), (7, None)])
+
+
 class SmokeGateTests(unittest.TestCase):
     def test_needs_the_variable_and_a_throwaway_home(self):
         ok = {"PARLEY_TRAY_SMOKE": "1", "PARLEY_HOME": "C:/tmp/parley_test_x"}
