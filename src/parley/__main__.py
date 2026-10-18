@@ -38,6 +38,9 @@ def _disable_console_quick_edit() -> None:
         k32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)  # -QUICK_EDIT, +EXTENDED_FLAGS
 
 
+SELF_CHECK_MODULES = ("tray", "tray_icons", "instance", "logsetup", "hotkey", "credstore", "config_io")
+
+
 def self_check(config_path: Path | None = None) -> int:
     """Smoke test for a freshly built copy: config loads, every parley module imports, the hotkey, audio and model
     libraries import. Opens no microphone and makes no network request. Returns the exit code (0 = fine)."""
@@ -58,8 +61,14 @@ def self_check(config_path: Path | None = None) -> int:
     for mod in pkgutil.iter_modules(__import__("parley").__path__):
         if mod.name != "__main__":
             attempt(f"module parley.{mod.name}", lambda n=mod.name: importlib.import_module(f"parley.{n}"))
-    for lib in ("pynput.keyboard", "sounddevice", "numpy", "httpx", "faster_whisper", "ctranslate2",
-                "onnxruntime", "kokoro_onnx"):
+    # The tray app's modules by name too (not only through the loop above): a frozen build must carry them.
+    for mod in SELF_CHECK_MODULES:
+        attempt(f"module parley.{mod}", lambda n=mod: importlib.import_module(f"parley.{n}"))
+    libs = ["pynput.keyboard", "sounddevice", "numpy", "httpx", "faster_whisper", "ctranslate2", "onnxruntime",
+            "kokoro_onnx", "tomlkit"]
+    if sys.platform == "win32":
+        libs += ["win32gui", "win32cred", "win32api", "win32con", "win32event"]  # pywin32: tray window, credential store
+    for lib in libs:
         attempt(f"library {lib}", lambda n=lib: importlib.import_module(n))
     if problems:
         print(f"parley {__version__} self-check FAILED: {', '.join(problems)}", file=sys.stderr)

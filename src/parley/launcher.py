@@ -24,7 +24,8 @@ POINTER = "current.json"
 POINTER_BACKUP = "current.json.prev"
 APP_DIR = "app"
 INDEX_NAME = ".parley-index.json"
-CHILD_EXE = "parley-app.exe"
+CHILD_EXE = "parley-app.exe"  # console exe: CLI, --ask, --self-check (install smoke test, release smoke)
+RUN_EXE = "parley-tray.exe"  # windowed exe the launcher starts: same app tree, implies --tray
 MAX_ATTEMPTS = 3
 MAX_LIST = 200  # skip / declined are bounded so a corrupt file can't grow without limit
 _VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", re.ASCII)
@@ -239,7 +240,7 @@ def tree_ok(root: Path, ptr: Pointer) -> bool:
 # ---------- running ----------
 
 def default_child(appdir: Path, args: list[str]) -> list[str]:
-    return [str(appdir / CHILD_EXE), *args]
+    return [str(appdir / RUN_EXE), *args]
 
 
 def run(root: Path, args: list[str] | None = None, *, child=default_child, runner=subprocess.call,
@@ -268,13 +269,34 @@ def run(root: Path, args: list[str] | None = None, *, child=default_child, runne
     return code
 
 
+def windowed() -> bool:
+    """True in the frozen windowed launcher: it has no console, so sys.stderr is None and errors need a dialog."""
+    return bool(getattr(sys, "frozen", False)) and sys.stderr is None
+
+
+def report_error(message: str) -> None:
+    """Tell the user: a MessageBox in the windowed launcher (nobody sees its stdout), else a line on stderr."""
+    if windowed() and sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, message, "Parley", 0x10)  # MB_OK | MB_ICONERROR
+            return
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
     try:
-        return run(root, sys.argv[1:] if argv is None else argv)
+        code = run(root, sys.argv[1:] if argv is None else argv)
     except LauncherError as e:
-        print(f"Parley cannot start: {e}", file=sys.stderr)
+        report_error(f"Parley cannot start: {e}")
         return 1
+    if code == 127:  # the exe could not be started at all (missing or blocked)
+        report_error(f"Parley cannot start: {RUN_EXE} could not be launched. Reinstall Parley or check your antivirus.")
+    return code
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 
 Steps: export the ref (default origin/main) -> `uv sync --frozen --group build` in the export with a scrubbed PATH (no
 CUDA toolkit) -> scripts/build.py (also regenerates cuda_pack.json; it must equal the committed one) -> scripts/make_installer.py
--> local smoke (`--version`, `--self-check`) on a throwaway PARLEY_HOME -> server layout:
+-> local smoke (`--version`, `--self-check`, then the tray exe via scripts/tray_smoke.py) on a throwaway PARLEY_HOME -> server layout:
 
     blobs/<sha256>                    every file of the app tree, content addressed (shared by all versions)
     <ver>/windows-x64/files.json      the per-version index (same bytes as the tree's .parley-index.json)
@@ -247,6 +247,14 @@ def smoke(appdir: Path, version: str, home: Path, ask: bool = False) -> None:
         if r.returncode != 0:
             raise ReleaseError(f"smoke {step[0]} failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
         print(f"smoke {step[0]}: ok", flush=True)
+    # the windowed tray exe: window up, no console, single instance, clean WM_CLOSE exit (no models needed)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import tray_smoke
+    try:
+        for line in tray_smoke.run_tray_smoke(appdir / launcher.RUN_EXE, home, env=clean_env()):
+            print(f"smoke tray: {line}", flush=True)
+    except tray_smoke.SmokeError as e:
+        raise ReleaseError(f"smoke tray exe failed: {e}") from e
 
 
 # ---------- layout ----------

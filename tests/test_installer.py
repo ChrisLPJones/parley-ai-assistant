@@ -25,6 +25,7 @@ def fake_tree(root: Path, version: str) -> Path:
     app.mkdir(parents=True)
     (root / "Parley.exe").write_bytes(b"MZ")
     (app / launcher.CHILD_EXE).write_bytes(b"MZ")
+    (app / launcher.RUN_EXE).write_bytes(b"MZ")
     (app / launcher.INDEX_NAME).write_bytes(b"{}")
     launcher.write_pointer(root, launcher.Pointer(version), backup=False)
     return root
@@ -85,6 +86,17 @@ class Helpers(unittest.TestCase):
         with self.assertRaises(mk.InstallerError):
             mk.check_source(tree, "1.2.2")
 
+    def test_check_source_requires_the_tray_exe(self):
+        tree = fake_tree(self.root, "1.2.3")
+        (tree / "app" / "1.2.3" / launcher.RUN_EXE).unlink()
+        with self.assertRaises(mk.InstallerError):
+            mk.check_source(tree, "1.2.3")
+
+    def test_icon_define_is_passed_when_given(self):
+        args = mk.iscc_args(Path("ISCC.exe"), "1.2.3", Path("s"), Path("o"), Path("x.iss"), Path("i.ico"))
+        self.assertIn("/DIconFile=i.ico", args)
+        self.assertEqual(args[-1], "x.iss")
+
     def test_check_source_rejects_bad_version_string(self):
         with self.assertRaises(mk.InstallerError):
             mk.check_source(self.root, "1.2.3\n#define X")
@@ -96,6 +108,21 @@ class Script(unittest.TestCase):
                        "AppVersion={#AppVersion}", "OutputBaseFilename=Parley-Setup-{#AppVersion}",
                        "Compression=lzma2/max", "SolidCompression=yes", "skipifsilent", "ConfirmUninstall"):
             self.assertIn(needle, ISS)
+
+    def test_app_mutex_matches_the_default_home_mutex_of_the_app(self):
+        from parley import instance
+        self.assertIn(f"AppMutex={instance.DEFAULT_MUTEX}", ISS)
+        self.assertEqual(instance.DEFAULT_MUTEX, "Local\\Parley-default")
+        self.assertIn("CloseApplications=yes", ISS)
+
+    def test_icon_shortcut_and_autostart_cleanup(self):
+        self.assertIn("SetupIconFile={#IconFile}", ISS)
+        self.assertIn("UninstallDisplayIcon={app}\\Parley.exe", ISS)
+        self.assertIn('Name: "{userprograms}\\Parley"; Filename: "{app}\\Parley.exe"', ISS)  # the windowed launcher
+        # the autostart Run value is removed on uninstall (and nothing here creates it)
+        self.assertIn("RegDeleteValue(HKCU, 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', 'Parley')", ISS)
+        self.assertNotIn("[Registry]", ISS)
+        self.assertIn("RemoveAutostart;", ISS.split("procedure CurUninstallStepChanged")[1])
 
     def test_no_bare_app_uninstall_delete(self):
         # a user may install into a folder that holds other files: only Parley's own paths may be deleted

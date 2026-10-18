@@ -3,9 +3,10 @@
     uv run --group build python scripts/build.py [--feed-url URL]
 
 Result in dist/install/ (this is what the installer will ship):
-    Parley.exe                  launcher (stdlib only)
+    Parley.exe                  launcher (stdlib only, windowed: starts parley-tray.exe)
     current.json                pointer to the one app version, state good
-    app/<version>/              parley-app.exe, _internal/, and .parley-index.json (sha256 + size of every other file)
+    app/<version>/              parley-app.exe (console: CLI, --ask, --self-check), parley-tray.exe (windowed, implies
+                                --tray), the shared _internal/, and .parley-index.json (sha256 + size of every other file)
 
 `src/parley/_build.py` (feed URL, platform key) is written for the duration of the build and removed afterwards; it
 is gitignored and never committed. An empty feed URL (the default) leaves updates off in the built copy.
@@ -13,6 +14,7 @@ Anything the update client's path rule rejects (ASCII letters, digits, `.`, `_`,
 """
 import argparse
 import hashlib
+import struct
 import importlib.util
 import json
 import os
@@ -25,13 +27,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from parley import __version__, launcher  # noqa: E402
+from parley import __version__, launcher, tray_icons  # noqa: E402
 from parley.update import PLATFORM_KEY, UpdateError, validate_index_files  # noqa: E402
 
 DIST = ROOT / "dist"
 WORK = ROOT / "build"
 SPEC = ROOT / "packaging" / "parley.spec"
 BUILD_PY = ROOT / "src" / "parley" / "_build.py"
+ICON = WORK / "parley.ico"  # the spec reads build/parley.ico
+SUBSYSTEM_GUI, SUBSYSTEM_CONSOLE = 2, 3  # IMAGE_SUBSYSTEM_WINDOWS_GUI / _CUI
 
 
 class BuildError(Exception):
@@ -106,6 +110,40 @@ def write_index(appdir: Path, version: str, allow_rejected: bool = False) -> str
     return hashlib.sha256(data).hexdigest()
 
 
+def write_icon(path: Path = ICON) -> Path:
+    """parley.ico (PNG-in-ICO, same renderer as the tray icons) for the exes; the installer reuses it for SetupIconFile."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tray_icons.write_ico(path)
+    return path
+
+
+def pe_subsystem(path: Path) -> int:
+    """The PE `Subsystem` field: 2 = windowed (no console is ever created), 3 = console. Raises BuildError if not a PE."""
+    with open(path, "rb") as f:
+        head = f.read(64)
+        if head[:2] != b"MZ" or len(head) < 64:
+            raise BuildError(f"{path.name} is not a Windows executable")
+        pe = struct.unpack_from("<I", head, 0x3C)[0]
+        f.seek(pe)
+        if f.read(4) != b"PE\0\0":
+            raise BuildError(f"{path.name} is not a Windows executable")
+        f.seek(pe + 24 + 68)  # optional header offset 68 = Subsystem (PE32 and PE32+)
+        return struct.unpack("<H", f.read(2))[0]
+
+
+def check_exes(root: Path, version: str) -> None:
+    """The install tree must hold the windowed launcher + tray exe and the console exe; a wrong subsystem would
+    flash a console at every start (tray/launcher) or hide the CLI output and --self-check result (app)."""
+    want = ((root / "Parley.exe", SUBSYSTEM_GUI), (launcher.app_path(root, version) / launcher.RUN_EXE, SUBSYSTEM_GUI),
+            (launcher.app_path(root, version) / launcher.CHILD_EXE, SUBSYSTEM_CONSOLE))
+    for exe, sub in want:
+        if not exe.is_file():
+            raise BuildError(f"{exe} is missing")
+        got = pe_subsystem(exe)
+        if got != sub:
+            raise BuildError(f"{exe.name} has PE subsystem {got}, expected {sub} ({'windowed' if sub == 2 else 'console'})")
+
+
 def layout(frozen_app: Path, frozen_launcher: Path, out: Path, version: str, allow_rejected: bool = False) -> Path:
     """Move the PyInstaller output into the install layout under `out`."""
     if out.exists():
@@ -132,6 +170,7 @@ def main() -> int:
     try:
         for d in (DIST, WORK):
             shutil.rmtree(d, ignore_errors=True)
+        write_icon()
         subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--distpath", str(DIST),
                         "--workpath", str(WORK), str(SPEC)], check=True, cwd=ROOT)
     finally:
@@ -141,6 +180,7 @@ def main() -> int:
             BUILD_PY.write_text(saved, "utf-8")
     appdir = layout(DIST / "parley-app", DIST / "Parley.exe", DIST / "install", __version__,
                     args.allow_rejected_paths)
+    check_exes(DIST / "install", __version__)
     total = sum(p.stat().st_size for p in (DIST / "install").rglob("*") if p.is_file())
     print(f"built parley {__version__} in {time.time() - t0:.0f}s: {DIST / 'install'} ({total / 1e6:.0f} MB), app tree {appdir}")
     return 0

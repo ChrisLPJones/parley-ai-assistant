@@ -13,12 +13,13 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from parley import __version__, launcher  # noqa: E402
+from parley import __version__, launcher, tray_icons  # noqa: E402
 
 SOURCE = ROOT / "dist" / "install"
 OUTPUT = ROOT / "dist" / "installer"
@@ -58,13 +59,16 @@ def check_source(source: Path, version: str) -> None:
     if ptr is None or ptr.version != version:
         raise InstallerError(f"{source} is not a build of {version} (current.json says {ptr.version if ptr else 'nothing'}): "
                              "run scripts/build.py first")
-    for rel in ("Parley.exe", f"app/{version}/{launcher.CHILD_EXE}", f"app/{version}/{launcher.INDEX_NAME}"):
+    for rel in ("Parley.exe", f"app/{version}/{launcher.CHILD_EXE}", f"app/{version}/{launcher.RUN_EXE}",
+                f"app/{version}/{launcher.INDEX_NAME}"):
         if not (source / rel).is_file():
             raise InstallerError(f"{source / rel} is missing: run scripts/build.py first")
 
 
-def iscc_args(iscc: Path, version: str, source: Path, output: Path, script: Path = SCRIPT) -> list[str]:
-    return [str(iscc), "/Q", f"/DAppVersion={version}", f"/DSourceDir={source}", f"/DOutputDir={output}", str(script)]
+def iscc_args(iscc: Path, version: str, source: Path, output: Path, script: Path = SCRIPT,
+              icon: Path | None = None) -> list[str]:
+    extra = [f"/DIconFile={icon}"] if icon else []
+    return [str(iscc), "/Q", f"/DAppVersion={version}", f"/DSourceDir={source}", f"/DOutputDir={output}", *extra, str(script)]
 
 
 def installer_path(output: Path, version: str) -> Path:
@@ -75,7 +79,11 @@ def make(source: Path = SOURCE, output: Path = OUTPUT, version: str = __version_
     check_source(source, version)
     exe = installer_path(output, version)
     exe.unlink(missing_ok=True)
-    r = subprocess.run(iscc_args(iscc or find_iscc(), version, source, output), cwd=ROOT, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix="parley_icon_") as d:  # SetupIconFile: the same renderer as the exes' icon
+        icon = Path(d, "parley.ico")
+        tray_icons.write_ico(icon)
+        r = subprocess.run(iscc_args(iscc or find_iscc(), version, source, output, icon=icon), cwd=ROOT,
+                           capture_output=True, text=True)
     if r.returncode != 0 or not exe.is_file():
         raise InstallerError("ISCC failed:\n" + "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:]))
     return exe

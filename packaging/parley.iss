@@ -2,17 +2,21 @@
 ; (passes the defines below; do not compile by hand without them). Result: dist\installer\Parley-Setup-<ver>.exe
 ;
 ; Per-user, no admin: installs to %LOCALAPPDATA%\Programs\Parley. It ships the tree built by scripts/build.py:
-;   Parley.exe (launcher), current.json (pointer, state good), app\<ver>\ (parley-app.exe + _internal).
+;   Parley.exe (windowed launcher), current.json (pointer, state good), app\<ver>\ (parley-app.exe console exe,
+;   parley-tray.exe windowed exe, shared _internal).
 ; The Parley home (%LOCALAPPDATA%\parley: models, config, CUDA pack) is never created, read or deleted here.
 ;
 ; Defines (from scripts/make_installer.py): AppVersion = parley.__version__ (single version source),
-; SourceDir = dist\install, OutputDir = dist\installer.
+; SourceDir = dist\install, OutputDir = dist\installer, IconFile = parley.ico (made by parley.tray_icons.write_ico).
 
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z (use scripts/make_installer.py)
 #endif
 #ifndef SourceDir
   #error Pass /DSourceDir=<dist\install> (use scripts/make_installer.py)
+#endif
+#ifndef IconFile
+  #error Pass /DIconFile=<parley.ico> (use scripts/make_installer.py)
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist\installer"
@@ -40,8 +44,14 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=Parley
+SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\Parley.exe
-; Close a running Parley (the launcher or the app) before replacing files, so an upgrade does not hit locked files.
+; Setup and the uninstaller ask the user to close a running Parley: the tray app holds this named mutex (the fixed name
+; src/parley/instance.py gives the DEFAULT Parley home, DEFAULT_MUTEX; a test keeps the two in sync). Only the default
+; home is covered: a throwaway PARLEY_HOME (tests, previews) or a custom one uses a different, hashed mutex name and
+; so never blocks an install.
+AppMutex=Local\Parley-default
+; Also close a running Parley (the launcher or the app) before replacing files, so an upgrade does not hit locked files.
 CloseApplications=yes
 ; ... and do not relaunch it afterwards (a scripted silent upgrade must not start the app).
 RestartApplications=no
@@ -51,7 +61,7 @@ RestartApplications=no
 
 ; --- Code signing (not done yet) -------------------------------------------------------------------------
 ; To sign the installer and its uninstaller later: define a SignTool in the Inno IDE or on the ISCC command
-; line (/Smysign=...) and uncomment the next two lines. Sign Parley.exe and parley-app.exe before building.
+; line (/Smysign=...) and uncomment the next two lines. Sign Parley.exe, parley-app.exe and parley-tray.exe before building.
 ;SignTool=mysign $f
 ;SignedUninstaller=yes
 
@@ -81,7 +91,7 @@ Type: files; Name: "{app}\current.json*"
 Type: files; Name: "{app}\Parley.exe.*"
 
 [Icons]
-; Console launcher for now; a windowed/tray launcher belongs to the later tray-app item.
+; The windowed launcher (no console); its icon is the one embedded in Parley.exe (parley.ico).
 Name: "{userprograms}\Parley"; Filename: "{app}\Parley.exe"; WorkingDir: "{app}"
 
 [Run]
@@ -158,10 +168,20 @@ begin
     Exec(ExpandConstant('{sys}\attrib.exe'), '-R "' + AddBackslash(Dir) + '*" /S /D', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+{ The "Start with Windows" setting (a later change) stores a Run value named Parley for this user. Remove it on
+  uninstall so Windows does not try to start a deleted program; it is fine if the value does not exist. }
+procedure RemoveAutostart;
+begin
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Parley');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
     ClearReadOnly(ExpandConstant('{app}\app'));
+    RemoveAutostart;
+  end;
 end;
 
 { Refuse to replace a newer install (for example one the in-app updater moved forward) with this older installer. }
