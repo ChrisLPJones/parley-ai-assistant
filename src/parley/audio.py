@@ -79,6 +79,7 @@ class Player:
     and the clip playing is cut off within ~50ms when its turn becomes stale."""
 
     BLOCK = SPEAKER_RATE // 20
+    RAMP = SPEAKER_RATE // 200  # 5ms fade at a clip's start and where a clip is cut off
 
     def __init__(self, device=None, is_current: Callable[[int], bool] = lambda turn: True):
         self.queue: queue.Queue[tuple[int, np.ndarray, Callable | None]] = queue.Queue()  # unfinished_tasks = still playing
@@ -98,7 +99,12 @@ class Player:
 
     def _run(self) -> None:
         while True:
-            turn, samples, on_start = self.queue.get()
+            try:
+                turn, samples, on_start = self.queue.get(timeout=0.5 * self.BLOCK / SPEAKER_RATE)
+            except queue.Empty:
+                # keep the device fed: a stream that runs dry makes the next clip start with a pop
+                self._stream.write(np.zeros(self.BLOCK // 2, dtype=np.float32))
+                continue
             try:
                 if samples is None:
                     try:
@@ -111,8 +117,15 @@ class Player:
                     continue
                 if on_start:
                     on_start()
+                samples = np.asarray(samples, dtype=np.float32).copy()
+                n = min(self.RAMP, len(samples))
+                samples[:n] *= np.linspace(0, 1, n, endpoint=False, dtype=np.float32)  # no step at the start
                 for i in range(0, len(samples), self.BLOCK):
                     if not self._is_current(turn):
+                        # cut off mid-clip: ramp the next few samples down instead of stopping dead
+                        tail = samples[i:i + self.RAMP]
+                        if len(tail) and i > 0:
+                            self._stream.write(tail * np.linspace(1, 0, len(tail), endpoint=False, dtype=np.float32))
                         break
                     self._stream.write(samples[i:i + self.BLOCK])
             finally:
