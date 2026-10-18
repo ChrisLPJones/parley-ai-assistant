@@ -1,6 +1,7 @@
 """Build helpers (scripts/build.py) that need no PyInstaller: _build.py text, file index, path rule, install layout."""
 import hashlib
 import importlib.util
+import struct
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ def write_tree(root: Path, files: dict[str, bytes]) -> None:
         (root / rel).write_bytes(data)
 
 
-GOOD = {"parley-app.exe": b"MZ" * 10, "_internal/python312.dll": b"d" * 3000, "_internal/pkg/data.json": b"{}"}
+GOOD = {"parley-app.exe": b"MZ" * 10, "parley-tray.exe": b"MZ" * 10, "_internal/python312.dll": b"d" * 3000, "_internal/pkg/data.json": b"{}"}
 
 
 class BuildPy(unittest.TestCase):
@@ -76,6 +77,78 @@ class Index(unittest.TestCase):
         self.assertFalse((app / launcher.INDEX_NAME).exists())
         build.write_index(app, "1.0.0", allow_rejected=True)
         self.assertTrue((app / launcher.INDEX_NAME).exists())
+
+
+def fake_pe(subsystem: int) -> bytes:
+    """Smallest thing pe_subsystem accepts: DOS header -> PE signature -> COFF header -> optional header with Subsystem."""
+    dos = bytearray(64)
+    dos[:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 64)
+    opt = bytearray(96)
+    struct.pack_into("<H", opt, 68, subsystem)
+    return bytes(dos) + b"PE\0\0" + bytes(20) + bytes(opt)
+
+
+class Executables(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="parley_test_build_")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def tree(self, launcher_sub=2, tray_sub=2, app_sub=3) -> Path:
+        app = launcher.app_path(self.root, "1.0.0")
+        app.mkdir(parents=True)
+        (self.root / "Parley.exe").write_bytes(fake_pe(launcher_sub))
+        (app / launcher.RUN_EXE).write_bytes(fake_pe(tray_sub))
+        (app / launcher.CHILD_EXE).write_bytes(fake_pe(app_sub))
+        return self.root
+
+    def test_subsystem_is_read_from_the_pe_header(self):
+        p = self.root / "a.exe"
+        p.write_bytes(fake_pe(2))
+        self.assertEqual(build.pe_subsystem(p), build.SUBSYSTEM_GUI)
+        p.write_bytes(fake_pe(3))
+        self.assertEqual(build.pe_subsystem(p), build.SUBSYSTEM_CONSOLE)
+        p.write_bytes(b"not an exe at all" * 10)
+        with self.assertRaises(build.BuildError):
+            build.pe_subsystem(p)
+
+    def test_windowed_launcher_and_tray_with_console_app_pass(self):
+        build.check_exes(self.tree(), "1.0.0")
+
+    def test_wrong_subsystem_fails_the_build(self):
+        for kw in ({"launcher_sub": 3}, {"tray_sub": 3}, {"app_sub": 2}):
+            with self.subTest(kw), tempfile.TemporaryDirectory(prefix="parley_test_build_") as d:
+                self.root = Path(d)
+                with self.assertRaises(build.BuildError):
+                    build.check_exes(self.tree(**kw), "1.0.0")
+
+    def test_missing_exe_fails_the_build(self):
+        root = self.tree()
+        (launcher.app_path(root, "1.0.0") / launcher.RUN_EXE).unlink()
+        with self.assertRaises(build.BuildError):
+            build.check_exes(root, "1.0.0")
+
+    def test_icon_is_a_valid_ico_with_the_app_sizes(self):
+        ico = build.write_icon(self.root / "x" / "parley.ico")
+        data = ico.read_bytes()
+        reserved, kind, count = struct.unpack_from("<HHH", data)
+        self.assertEqual((reserved, kind, count), (0, 1, 5))
+        for i in range(count):  # every image is a PNG inside the file
+            size, offset = struct.unpack_from("<II", data, 6 + 16 * i + 8)
+            self.assertEqual(data[offset:offset + 8], b"\x89PNG\r\n\x1a\n")
+            self.assertLessEqual(offset + size, len(data))
+
+    def test_spec_builds_two_exes_in_one_collect_and_a_windowed_launcher(self):
+        spec = (Path(build.__file__).parent.parent / "packaging" / "parley.spec").read_text("utf-8")
+        self.assertIn('name="parley-app", console=True', spec)
+        self.assertIn('name="parley-tray", console=False', spec)
+        self.assertIn('name="Parley", console=False', spec)
+        self.assertIn("COLLECT(app_exe, tray_exe,", spec)
+        self.assertEqual(spec.count("icon=ICON"), 3)
+        self.assertIn(launcher.RUN_EXE, "parley-tray.exe")  # the exe name is what implies --tray
+        from parley import tray_mode
+        self.assertEqual(tray_mode.TRAY_EXE_STEM + ".exe", launcher.RUN_EXE)
 
 
 class Layout(unittest.TestCase):

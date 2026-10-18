@@ -19,7 +19,10 @@ from . import config, credstore, download, instance, logsetup, tray
 
 log = logging.getLogger(__name__)
 
-TRAY_EXE_STEM = "parley-tray"  # the future windowed exe: its name implies --tray
+TRAY_EXE_STEM = "parley-tray"  # the windowed exe (packaging/parley.spec): its name implies --tray
+SMOKE_ENV = "PARLEY_TRAY_SMOKE"
+SMOKE_HOME_PREFIX = "parley_test_"
+SMOKE_TIMEOUT_S = 300.0
 MAX_ERROR_CHARS = 200
 DEBOUNCE_S = 0.15
 POLL_S = 0.1
@@ -30,6 +33,15 @@ _faulthandler_file = None  # kept open for the life of the process
 def implied() -> bool:
     """True when this process is the windowed tray exe (no `--tray` flag needed)."""
     return bool(getattr(sys, "frozen", False)) and Path(sys.executable).stem.lower() == TRAY_EXE_STEM
+
+
+def smoke_requested(env: dict | None = None) -> bool:
+    """Test-only mode for the packaged-build smoke test (scripts/tray_smoke.py): create the tray window, do NOT build
+    Parley or download anything, and exit 0 on WM_CLOSE. Gated twice so production never enters it: the variable
+    `PARLEY_TRAY_SMOKE=1` AND a `PARLEY_HOME` whose folder name starts with `parley_test_` (never the real home)."""
+    env = os.environ if env is None else env
+    home = env.get("PARLEY_HOME")
+    return env.get(SMOKE_ENV) == "1" and bool(home) and Path(home).name.startswith(SMOKE_HOME_PREFIX)
 
 
 def short_error(msg: object) -> str:
@@ -125,8 +137,10 @@ class StateDebouncer:
 # ---------- the app ----------
 
 class TrayApp:
-    def __init__(self, args, create_flow: Callable, tray_factory=tray.Tray, welcome_dir: Path | None = None) -> None:
+    def __init__(self, args, create_flow: Callable, tray_factory=tray.Tray, welcome_dir: Path | None = None,
+                 smoke: bool = False) -> None:
         self.args = args
+        self.smoke = smoke
         self.create_flow = create_flow
         self.home = config.app_dir()
         self.welcome_dir = welcome_dir or self.home
@@ -148,17 +162,29 @@ class TrayApp:
         download.set_observer(self._on_download)
         CrashHooks(self.tray.balloon).install()
         self._refresh_menu()
-        self._set_state("starting")
-        self.tray.set_tooltip("Parley: starting...")
-        threading.Thread(target=self._boot, daemon=True, name="boot").start()
+        if self.smoke:
+            log.info("Smoke test mode: tray window only, nothing is loaded")
+            self._set_state("idle")
+            self.tray.set_tooltip("Parley (smoke test)")
+            timer = threading.Timer(SMOKE_TIMEOUT_S, self.request_quit)  # never leave a stray process behind
+            timer.daemon = True
+            timer.start()
+        else:
+            self._set_state("starting")
+            self.tray.set_tooltip("Parley: starting...")
+            threading.Thread(target=self._boot, daemon=True, name="boot").start()
+        asked = False
         try:
             self.tray.run()
         except KeyboardInterrupt:
-            pass
+            asked = True
         finally:
+            # Recorded BEFORE shutdown(), which sets quit_event itself. A window that existed and then closed
+            # (Quit, WM_CLOSE, logoff) is a quit; run() returning without ever having created it is a failure.
+            asked = asked or self.quit_event.is_set() or bool(getattr(self.tray, "created", True))
             self.shutdown()
-        if not self.quit_event.is_set() and not self.exit_code:
-            log.error("The tray window is gone without a quit request")
+        if not asked and not self.exit_code:
+            log.error("The tray window could not be created")
             self.exit_code = 1
         if self.restarting and self.flow is not None:
             self.flow.restart()  # an update was installed: the launcher starts the new version
@@ -227,7 +253,9 @@ class TrayApp:
         self.tray.balloon("Parley could not start", text)
         if fatal:
             self.exit_code = 1
-            threading.Timer(4.0, self.tray.stop).start()  # long enough to read the balloon
+            timer = threading.Timer(4.0, self.tray.stop)  # long enough to read the balloon
+            timer.daemon = True  # must not keep the process alive if the window is closed first
+            timer.start()
 
     def _set_state(self, state: str) -> None:
         log.info("Tray icon: %s", state)
@@ -337,7 +365,7 @@ def run(args, create_flow: Callable) -> int:
         woke = instance.wake_existing()
         log.info("Parley is already running (%s)", "asked it to open Settings" if woke else "no window found")
         return 0
-    app = TrayApp(args, create_flow)
+    app = TrayApp(args, create_flow, smoke=smoke_requested())
     try:
         return app.run()
     finally:

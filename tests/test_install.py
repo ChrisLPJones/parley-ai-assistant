@@ -305,6 +305,41 @@ class LauncherTests(Base):
     def go(self, **kw):
         return launcher.run(self.root, [], child=child, **kw)
 
+    def test_default_child_is_the_windowed_tray_exe_not_the_console_exe(self):
+        cmd = launcher.default_child(Path("app/1.0.0"), ["--x"])
+        self.assertEqual(Path(cmd[0]).name, "parley-tray.exe")
+        self.assertEqual(cmd[1:], ["--x"])
+        self.assertEqual(launcher.CHILD_EXE, "parley-app.exe")  # self-check / CLI keep the console exe
+
+    def test_errors_go_to_a_message_box_only_in_the_windowed_launcher(self):
+        with mock.patch.object(launcher, "windowed", return_value=False),                 mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+            launcher.report_error("boom")
+        self.assertIn("boom", err.getvalue())
+        if sys.platform == "win32":
+            box = mock.Mock()
+            with mock.patch.object(launcher, "windowed", return_value=True),                     mock.patch("ctypes.windll", create=True) as win:
+                win.user32.MessageBoxW = box
+                launcher.report_error("boom")
+            self.assertEqual(box.call_args.args[1], "boom")
+
+    def test_windowed_means_frozen_without_stderr(self):
+        self.assertFalse(launcher.windowed())  # a normal python run
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch("sys.stderr", None):
+            self.assertTrue(launcher.windowed())
+
+    def test_main_reports_missing_version_and_unstartable_exe(self):
+        said = []
+        with mock.patch.object(launcher, "report_error", said.append):
+            with mock.patch.object(launcher, "run", side_effect=launcher.LauncherError("none")):
+                self.assertEqual(launcher.main([]), 1)
+            with mock.patch.object(launcher, "run", return_value=127):
+                self.assertEqual(launcher.main([]), 127)
+            with mock.patch.object(launcher, "run", return_value=3):
+                self.assertEqual(launcher.main([]), 3)  # the app's own exit codes are passed through silently
+        self.assertEqual(len(said), 2)
+        self.assertIn("none", said[0])
+        self.assertIn("parley-tray.exe", said[1])
+
     def install_pending(self, main: bytes):
         seed(self.root, "0.1.0", tree())
         self.install(*self.release("0.2.0", tree(main)))

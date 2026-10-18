@@ -20,6 +20,11 @@ def app_dir() -> Path:
     """Where Parley keeps its config, downloaded runtime and models (several GB). PARLEY_HOME overrides."""
     if os.environ.get("PARLEY_HOME"):
         return Path(os.environ["PARLEY_HOME"])
+    return default_app_dir()
+
+
+def default_app_dir() -> Path:
+    """The real Parley home for this platform (ignores PARLEY_HOME)."""
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "parley"
     if sys.platform == "darwin":

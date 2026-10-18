@@ -1,7 +1,9 @@
 """Single running tray instance per Parley home, via a named mutex (Windows).
 
-The name is `Local\\Parley-<8 hex of sha256(home)>`, so a throwaway PARLEY_HOME never collides with the real app. The
-mutex is used only as "exists or not" (the first creator keeps the handle for the life of the process), so there is no
+The name is `Local\\Parley-<8 hex of sha256(home)>`, so a throwaway PARLEY_HOME never collides with the real app,
+except the DEFAULT home (no PARLEY_HOME): it has the fixed name `DEFAULT_MUTEX`, because the installer's `AppMutex=`
+(packaging/parley.iss) must name it without knowing the installing user's paths. A throwaway home therefore never makes
+the installer or uninstaller ask to close anything. The mutex is used only as "exists or not" (the first creator keeps the handle for the life of the process), so there is no
 owner or abandoned-mutex case to handle. A second launch finds the first one's window and posts it a registered
 message ("open settings"); neither the mutex nor the message carries any data.
 """
@@ -14,12 +16,17 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+DEFAULT_MUTEX = "Local\\Parley-default"  # keep in sync with AppMutex in packaging/parley.iss (a test checks it)
 RESTART_WAIT_S = 20.0  # `--restarted`: the old process is still tearing down
 _ERROR_ALREADY_EXISTS = 183
 
 
 def mutex_name(home: Path) -> str:
+    from . import config  # imported here, not at module level, to keep this module's import light
+
     key = os.path.normcase(os.path.abspath(str(home)))
+    if key == os.path.normcase(os.path.abspath(str(config.default_app_dir()))):
+        return DEFAULT_MUTEX
     return "Local\\Parley-" + hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:8]
 
 

@@ -121,6 +121,16 @@ class FakeTray:
     def run(self): pass
 
 
+class GoneTray(FakeTray):
+    """run() returns at once, as the real Tray does when its window could not be created."""
+    created = False
+
+
+class ClosedTray(FakeTray):
+    """The window existed and was closed from outside (WM_CLOSE / logoff): quit_event was never set by the app."""
+    created = True
+
+
 class ScratchHome(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="parley_test_traymode_")
@@ -217,6 +227,53 @@ class TrayAppTests(ScratchHome):
         app._on_download("model.gguf", 1000, 1000)
         self.assertEqual(app.tray.items[0].label, "Starting...")
 
+    def run_app(self, factory, smoke=True):
+        args = argparse.Namespace(config=None, restarted=False, verbose=False)
+        app = tray_mode.TrayApp(args, lambda a, c: None, tray_factory=factory, welcome_dir=self.home, smoke=smoke)
+        with mock.patch.object(sys, "excepthook", sys.excepthook),                 mock.patch.object(threading, "excepthook", threading.excepthook),                 mock.patch.object(tray_mode.threading, "Timer"):
+            if factory is GoneTray:
+                with self.assertLogs("parley.tray_mode", "ERROR"):
+                    return app.run()
+            return app.run()
+
+    def test_run_exits_nonzero_when_the_tray_window_could_not_be_created(self):
+        self.assertEqual(self.run_app(GoneTray), 1)  # the launcher's rollback relies on a non-zero exit
+
+    def test_run_exits_zero_when_the_window_was_closed_from_outside(self):
+        self.assertEqual(self.run_app(ClosedTray), 0)
+
+    def test_run_exits_zero_after_a_quit_request(self):
+        class QuitTray(GoneTray):
+            def run(self):
+                self.owner.request_quit()
+        args = argparse.Namespace(config=None, restarted=False, verbose=False)
+        holder = {}
+        def factory(**kw):
+            t = QuitTray(**kw)
+            holder["t"] = t
+            return t
+        app = tray_mode.TrayApp(args, lambda a, c: None, tray_factory=factory, welcome_dir=self.home, smoke=True)
+        holder["t"].owner = app
+        with mock.patch.object(sys, "excepthook", sys.excepthook), mock.patch.object(threading, "excepthook", threading.excepthook),                 mock.patch.object(tray_mode.threading, "Timer"):
+            self.assertEqual(app.run(), 0)
+
+    def test_fatal_error_timer_is_a_daemon(self):
+        app = self.make()
+        with mock.patch.object(tray_mode.threading, "Timer") as timer:
+            app._fail("boom", fatal=True)
+        self.assertEqual(app.exit_code, 1)
+        self.assertIs(timer.return_value.daemon, True)
+        timer.return_value.start.assert_called_once()
+        self.assertEqual(timer.call_args.args[1], app.tray.stop)
+
+    def test_smoke_mode_loads_nothing(self):
+        app = self.make()
+        app.smoke = True
+        with mock.patch.object(tray_mode.threading, "Thread") as thread, mock.patch.object(tray_mode.threading, "Timer"),                 mock.patch.object(sys, "excepthook", sys.excepthook), mock.patch.object(threading, "excepthook", threading.excepthook):
+            app.run()
+        thread.assert_not_called()  # no boot thread: no Parley, no models, no downloads
+        self.assertIn(("state", "idle"), app.tray.calls)
+
     def test_quit_stops_the_tray(self):
         app = self.make()
         app.request_quit()
@@ -230,6 +287,17 @@ class TrayAppTests(ScratchHome):
         balloons = [c for c in app.tray.calls if c[0] == "balloon"]
         self.assertEqual(len(balloons), 1)
         self.assertIn("Pause", balloons[0][2])
+
+
+class SmokeGateTests(unittest.TestCase):
+    def test_needs_the_variable_and_a_throwaway_home(self):
+        ok = {"PARLEY_TRAY_SMOKE": "1", "PARLEY_HOME": "C:/tmp/parley_test_x"}
+        self.assertTrue(tray_mode.smoke_requested(ok))
+        for bad in ({**ok, "PARLEY_TRAY_SMOKE": "0"}, {**ok, "PARLEY_TRAY_SMOKE": "true"},
+                    {"PARLEY_TRAY_SMOKE": "1"},  # no PARLEY_HOME: the real home
+                    {**ok, "PARLEY_HOME": "C:/Users/me/AppData/Local/parley"},
+                    {**ok, "PARLEY_HOME": ""}, {"PARLEY_HOME": ok["PARLEY_HOME"]}):
+            self.assertFalse(tray_mode.smoke_requested(bad), bad)
 
 
 class ShimTests(unittest.TestCase):

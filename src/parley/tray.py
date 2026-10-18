@@ -159,6 +159,7 @@ if AVAILABLE:
             self.on_open_settings = on_open_settings  # a second launch asked for it
             self.on_activate = on_activate  # left click on the icon
             self.visible = False  # the icon is currently in the notification area
+            self.created = False  # the window existed: run() returned after a stop/close, not because creation failed
             self._state = "starting"
             self._tooltip = tooltip
             self._items: list[MenuItem] = []
@@ -202,6 +203,7 @@ if AVAILABLE:
                 self._cleanup()
                 self._ready.set()
                 return
+            self.created = True
             self._ready.set()
             try:
                 while not self._stop.is_set():
@@ -461,6 +463,7 @@ else:
         def __init__(self, on_menu_command=None, *, on_activate=None, tooltip: str = "Parley",
                      on_open_settings=None) -> None:
             self.visible = False
+            self.created = True
             self._stop = threading.Event()
 
         def set_state(self, state: str) -> None: ...

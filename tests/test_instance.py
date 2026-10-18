@@ -8,6 +8,8 @@ import time
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
 from parley import instance
 
 WIN = sys.platform == "win32"
@@ -35,6 +37,20 @@ class NameTests(unittest.TestCase):
         self.assertRegex(a, r"^Local\\Parley-[0-9a-f]{8}$")
         self.assertNotEqual(a, b)
         self.assertEqual(a, instance.mutex_name(Path("C:/x/parley_test_a")))
+
+
+class DefaultNameTests(unittest.TestCase):
+    def test_default_home_has_the_fixed_installer_name_and_throwaway_homes_do_not(self):
+        from parley import config
+        self.assertEqual(instance.mutex_name(config.default_app_dir()), instance.DEFAULT_MUTEX)
+        self.assertEqual(instance.DEFAULT_MUTEX, "Local\\Parley-default")
+        self.assertNotEqual(instance.mutex_name(Path("C:/x/parley_test_a")), instance.DEFAULT_MUTEX)
+
+    def test_app_dir_ignores_default_when_parley_home_is_set(self):
+        from parley import config
+        with mock.patch.dict(os.environ, {"PARLEY_HOME": "C:/x/parley_test_a"}):
+            self.assertEqual(config.app_dir(), Path("C:/x/parley_test_a"))
+            self.assertNotEqual(config.default_app_dir(), config.app_dir())
 
 
 @unittest.skipUnless(WIN, "named mutex is Windows only")

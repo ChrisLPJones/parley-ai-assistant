@@ -69,8 +69,9 @@ change either with `model`. Any other GGUF works locally via `model_repo` + `mod
 A packaged installer (`Parley-Setup-<version>.exe`, per-user, no administrator rights, installs to
 `%LOCALAPPDATA%\Programs\Parley` with a Start menu entry) can be built (see [Build](#build)) but is not published anywhere yet; once it
 is, you download it from the project's release or update site. Running a newer installer upgrades in place; uninstalling
-removes the program but never your Parley data (`%LOCALAPPDATA%\parley`: models, settings, GPU libraries). The Start menu entry opens
-a console window for now. Until the installer is published you run Parley from source.
+removes the program but never your Parley data (`%LOCALAPPDATA%\parley`: models, settings, GPU libraries). The Start menu entry starts
+Parley in the notification area (no console window; logs go to `%LOCALAPPDATA%\parley\logs\parley.log`). The installer and uninstaller
+ask you to close a running Parley first. Until the installer is published you run Parley from source.
 
 Prerequisites:
 
@@ -111,9 +112,11 @@ dependency group (never installed for normal use):
 uv run --group build python scripts/build.py
 ```
 
-It writes `dist\install\` (about 620 MB; the NVIDIA CUDA libraries are not bundled, see below):
-`Parley.exe` (a small launcher), `current.json` and `app\<version>\parley-app.exe` with its libraries.
-Run `dist\install\Parley.exe`, or `parley-app.exe --self-check` to test the build. `--feed-url URL` bakes in
+It writes `dist\install\` (about 635 MB; the NVIDIA CUDA libraries are not bundled, see below):
+`Parley.exe` (a small windowed launcher), `current.json` and `app\<version>\` with two executables that share one `_internal\` folder:
+`parley-tray.exe` (windowed, no console: the tray app the launcher starts) and `parley-app.exe` (console: `--ask`, `--list-devices`,
+`--self-check`). Run `dist\install\Parley.exe`, or `parley-app.exe --self-check` to test the build, or
+`uv run python scripts/tray_smoke.py --exe dist\install\Parley.exe` to check the tray app (window, no console, single instance, clean exit). `--feed-url URL` bakes in
 an update server (default: none, so the built copy never checks for updates). `dist\` and `build\` are
 not committed. Release builds must be made in a clean environment (no CUDA toolkit on `PATH`). 
 
@@ -123,7 +126,7 @@ The single-file installer is made from that tree with [Inno Setup 6](https://jrs
 uv run python scripts/make_installer.py
 ```
 
-It writes `dist\installer\Parley-Setup-<version>.exe` (about 173 MB, LZMA2 solid compression; about a minute) and prints its size and
+It writes `dist\installer\Parley-Setup-<version>.exe` (about 186 MB, LZMA2 solid compression; about a minute) and prints its size and
 sha256. The version comes from `parley.__version__`. `packaging/parley.iss` has a commented-out `SignTool` hook; the installer is not signed yet,
 so Windows SmartScreen will warn. Silent install for testing: `Parley-Setup-<ver>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=<dir> /LOG=<file>`.
 

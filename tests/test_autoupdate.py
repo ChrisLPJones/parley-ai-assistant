@@ -351,6 +351,35 @@ class SelfCheckTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
             self.assertIn("self-check ok", r.stdout)
 
+    def test_tray_modules_and_pywin32_are_imported(self):
+        import importlib
+        seen = []
+        real = importlib.import_module
+
+        def spy(name, *a, **k):
+            seen.append(name)
+            return real(name, *a, **k)
+
+        with tempfile.TemporaryDirectory(prefix="parley_test_wire_") as d,                 mock.patch("importlib.import_module", side_effect=spy):
+            self.assertEqual(cli.self_check(Path(d) / "config.toml"), 0)
+        for mod in ("tray", "tray_icons", "instance", "logsetup", "hotkey", "credstore", "config_io"):
+            self.assertIn(f"parley.{mod}", seen)
+        if sys.platform == "win32":
+            for lib in ("win32gui", "win32cred"):
+                self.assertIn(lib, seen)
+
+    def test_missing_pywin32_piece_gives_nonzero(self):
+        import importlib
+        real = importlib.import_module
+
+        def fake(name, *a, **k):
+            if name == "win32cred":
+                raise ImportError("boom")
+            return real(name, *a, **k)
+
+        with tempfile.TemporaryDirectory(prefix="parley_test_wire_") as d,                 mock.patch("importlib.import_module", side_effect=fake):
+            self.assertEqual(cli.self_check(Path(d) / "config.toml"), 1 if sys.platform == "win32" else 0)
+
     def test_missing_library_gives_nonzero(self):
         import importlib
         real = importlib.import_module
