@@ -33,7 +33,7 @@ def activity_of(recording: bool, jobs_busy: bool, sentences_busy: bool, playing:
 
 
 class Parley:
-    def __init__(self, cfg: Config, use_mic: bool = True):
+    def __init__(self, cfg: Config, use_mic: bool = True, on_pack_ready=None):
         self.cfg = cfg
         self.turn = 0  # bumped whenever a new question starts; stale work checks it and stops
         self._jobs: queue.Queue[tuple[int, np.ndarray | str, float]] = queue.Queue()
@@ -44,7 +44,7 @@ class Parley:
         home = app_dir()
         log.info("Hardware: %s", gpu.describe())
         if use_mic:  # a typed --ask smoke run never starts a 1.6 GB download
-            cuda_pack.start_background(cfg, gpu.current_plan(), home, self.say)  # packaged NVIDIA copies only
+            cuda_pack.start_background(cfg, gpu.current_plan(), home, self.say, on_pack_ready)  # packaged NVIDIA copies only
         # The LLM loads into VRAM in the background while speech models load
         llm_ready = threading.Thread(target=self._start_llm, args=(home,), daemon=True)
         llm_ready.start()
@@ -106,6 +106,16 @@ class Parley:
     def say(self, text: str) -> None:
         """Speak a short notice of our own (e.g. about updates). Dropped if the user starts a question meanwhile."""
         self._sentences.put((self.turn, text, time.perf_counter()))
+
+    def speak_notice(self, sentences: list[str]) -> int:
+        """Speak a few sentences of our own (the first-run welcome) as one turn and return its id. `finished` is set
+        when the last one has really been played; a key press bumps `turn`, drops the rest and leaves it unset."""
+        turn, t0 = self.turn, time.perf_counter()
+        self.finished.clear()
+        for sentence in sentences:
+            self._sentences.put((turn, sentence, t0))
+        self._sentences.put((turn, None, t0))
+        return turn
 
     # --- settings window (any thread) ---
 

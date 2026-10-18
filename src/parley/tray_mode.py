@@ -28,6 +28,9 @@ DEBOUNCE_S = 0.15
 POLL_S = 0.1
 SETTINGS_DEBOUNCE_S = 1.5  # one click (or double click) = one request; the window itself is idempotent anyway
 WELCOME_MARK = "tray_welcomed"
+WELCOME_MAX_S = 120.0  # give up waiting for the spoken welcome after this long
+IDLE_POLL_S = 0.5  # how often the welcome and the GPU restart look at whether Parley is idle
+IDLE_CHECKS = 3  # consecutive idle looks before the automatic restart
 _faulthandler_file = None  # kept open for the life of the process
 
 
@@ -167,6 +170,8 @@ class TrayApp:
         self._download: tuple[str, int] | None = None  # (file name, percent or -1)
         self._ready = False
         self._lock = threading.Lock()
+        self._welcome_active = threading.Event()  # the spoken welcome is pending or playing: counts as busy
+        self._pack_restart = False  # the automatic restart after the GPU libraries arrived is already scheduled
         self._last_settings = float("-inf")  # monotonic time of the last accepted Settings request
 
     # ---- life cycle ----
@@ -227,7 +232,7 @@ class TrayApp:
             from .app import Parley
             from .hotkey import HotkeyListener
 
-            app = Parley(cfg, use_mic=True)
+            app = Parley(cfg, use_mic=True, on_pack_ready=None if self.args.restarted else self._on_pack_ready)
             hotkey = HotkeyListener(app, cfg.hotkey.key)
             hotkey.start()
             app.on_applied = self._on_applied
@@ -276,16 +281,91 @@ class TrayApp:
         log.info("Tray icon: %s", state)
         self.tray.set_state(state)
 
-    def _welcome(self) -> None:
+    def _welcome(self) -> threading.Thread | None:
+        """First run only (the `tray_welcomed` mark): a balloon, and Parley says a short brief out loud. The mark is
+        written once the brief has really been spoken, so an interrupted welcome comes back on the next start."""
         mark = self.welcome_dir / WELCOME_MARK
+        if mark.exists():
+            return None
+        self.tray.balloon("Parley is ready", f"Hold {self._key_label()} and speak.")
+        if not hasattr(self.app, "speak_notice"):
+            self._mark_welcomed(mark)
+            return None
+        self._welcome_active.set()
+        t = threading.Thread(target=self._speak_welcome, args=(mark,), daemon=True, name="welcome")
+        t.start()
+        return t
+
+    def _mark_welcomed(self, mark: Path) -> None:
         try:
-            if mark.exists():
-                return
             mark.parent.mkdir(parents=True, exist_ok=True)
             mark.write_text("1", "utf-8")
         except OSError:
+            pass
+
+    def welcome_sentences(self) -> list[str]:
+        key = self._key_label()
+        return [
+            "Welcome to Parley.",
+            f"To ask me something, hold the {key} key, speak, and let go when you are done.",
+            f"Press {key} again while I am talking to interrupt me.",
+            "To change settings, right-click the Parley icon in the taskbar notification area, near the clock, "
+            "and choose Settings.",
+            "If you don't see the icon, click the little up arrow to find it.",
+        ]
+
+    def _speak_welcome(self, mark: Path) -> None:
+        try:
+            app = self.app
+            turn0 = app.turn
+            deadline = time.monotonic() + WELCOME_MAX_S
+            while app.is_busy():  # wait for a quiet moment; a key press meanwhile cancels the welcome
+                if self.quit_event.wait(IDLE_POLL_S) or app.turn != turn0 or time.monotonic() > deadline:
+                    return
+            if app.turn != turn0:
+                return
+            turn = app.speak_notice(self.welcome_sentences())
+            while not app.finished.wait(IDLE_POLL_S):
+                if self.quit_event.is_set() or app.turn != turn or time.monotonic() > deadline:
+                    return
+            if app.turn == turn:
+                self._mark_welcomed(mark)
+                log.info("Spoken welcome done")
+        except Exception:
+            log.exception("The spoken welcome failed")
+        finally:
+            self._welcome_active.clear()
+
+    # ---- GPU libraries arrived: restart so the models use them ----
+    def _on_pack_ready(self) -> None:
+        """Called on the download thread after the CUDA pack was installed in THIS run (never when it was already
+        there). Restarts Parley once, when idle, so Whisper, Kokoro and the LLM come up on the GPU. Not after an
+        update/Settings restart (`--restarted`): that is the loop guard for a pack that installs but never becomes usable."""
+        from . import cuda_pack
+
+        if self.args.restarted or cuda_pack.usable_dir(self.home) is None:
+            log.info("GPU libraries installed; they are used from the next start")
             return
-        self.tray.balloon("Parley is ready", f"Hold {self._key_label()} and speak.")
+        with self._lock:
+            if self._pack_restart:
+                return
+            self._pack_restart = True
+        log.info("GPU libraries installed; restarting Parley when it is idle")
+        quiet = 0
+        while not self.quit_event.wait(IDLE_POLL_S):
+            quiet = quiet + 1 if self._is_idle() else 0
+            if quiet >= IDLE_CHECKS:
+                if not self._is_idle():  # last look right before restarting
+                    quiet = 0
+                    continue
+                self.tray.balloon("Parley", "GPU libraries ready - restarting Parley")
+                self.restart_app()
+                return
+
+    def _is_idle(self) -> bool:
+        app = self.app
+        return bool(self._ready and not self.error and app is not None and not self._welcome_active.is_set()
+                    and not app.is_busy())
 
     def _key_label(self) -> str:
         return self.key_name.replace("_", " ").title()
