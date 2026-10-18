@@ -147,12 +147,16 @@ class TrayApp:
         self.welcome_dir = welcome_dir or self.home
         self.tray = tray_factory(on_activate=threaded(self.open_settings, "activate"),
                                  on_open_settings=threaded(self.open_settings, "open-settings"))
-        from . import settings_window  # tkinter: imported only when the tray app exists, never for the console loop
+        self.settings_host = None  # None = Settings unavailable (tkinter missing); the tray keeps working
+        try:
+            from . import settings_window  # tkinter: imported only when the tray app exists, never for the console loop
 
-        self.settings_host = settings_window.Host(
-            args.config or config.default_config_path(),
-            get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
-            get_hotkey=lambda: self.hotkey, on_applied=self._on_applied)
+            self.settings_host = settings_window.Host(
+                args.config or config.default_config_path(),
+                get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
+                get_hotkey=lambda: self.hotkey, on_applied=self._on_applied)
+        except ImportError as e:
+            log.warning("Settings are unavailable: %s", e)
         self.app = self.flow = self.hotkey = None
         self.key_name = "pause"
         self.quit_event = threading.Event()
@@ -226,6 +230,7 @@ class TrayApp:
             app = Parley(cfg, use_mic=True)
             hotkey = HotkeyListener(app, cfg.hotkey.key)
             hotkey.start()
+            app.on_applied = self._on_applied
             app.hotkey = hotkey  # Settings re-points it when the talk key changes
             self.app, self.hotkey = app, hotkey
             self.flow = self.create_flow(app, cfg)
@@ -352,6 +357,9 @@ class TrayApp:
                 return
             self._last_settings = now
         log.info("Settings requested")
+        if self.settings_host is None:
+            self.tray.balloon("Parley", "Settings could not start (a component is missing). Edit config.toml for now.")
+            return
         from . import settings_window
 
         if not settings_window.open_settings(self.settings_host):

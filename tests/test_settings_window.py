@@ -18,7 +18,7 @@ from unittest import mock
 
 from parley import config_io, settings_schema as S, settings_window as sw, ui, ui_preview, voices
 
-SECRET = "sk-ant-" "api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+SECRET = "TESTKEY-not-a-real-secret-0123456789"
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -256,6 +256,30 @@ class WindowTests(WindowCase):
         text, kind = self.banner()
         self.assertEqual(kind, "error")
         self.assertTrue(text.startswith("Parley could not start:"))
+
+    def test_save_without_an_app_but_with_restart_offers_restart_now(self):
+        host = sw.Host(self.cfg_path, autostart_api=ui_preview.FakeAutostart(), list_devices=lambda k: [], restart=lambda: None)
+        self.open(host)
+        self.set_speed(1.25)
+        self.on_ui(self.win.save)
+        text, kind = self.banner()
+        self.assertEqual((text, kind), ("Saved. Restart Parley to use it.", "warn"))
+        self.assertTrue(self.on_ui(lambda: self.win.restart_btn.winfo_manager() != ""))
+
+    def test_failed_restart_reenables_the_button_and_says_so(self):
+        host, _h, _ = ui_preview.build_host("restart-needed", home=self.home)
+
+        def boom():
+            raise OSError("cannot start")
+
+        host._restart = boom
+        self.open(host)
+        with self.assertLogs("parley.settings_window", "ERROR"):
+            self.on_ui(self.win._restart_now)
+            self.wait_banner("Parley couldn't restart")
+        self.assertEqual(self.banner()[1], "error")
+        self.assertFalse(self.on_ui(lambda: self.win.restart_btn.instate(["disabled"])))
+        self.assertTrue(self.on_ui(lambda: self.win.restart_btn.winfo_manager() != ""))
 
     def test_without_a_running_app_save_still_writes_and_the_sample_is_off(self):
         host = sw.Host(self.cfg_path, autostart_api=ui_preview.FakeAutostart(), list_devices=lambda k: [])
@@ -525,6 +549,25 @@ class TrayWiringTests(unittest.TestCase):
                 app._last_settings -= tray_mode_debounce() + 0.1  # later, a new action counts
                 app.open_settings()
             self.assertEqual(len(calls), 2)
+
+    def test_missing_tkinter_keeps_the_tray_running(self):
+        import builtins
+
+        real = builtins.__import__
+
+        def fake(name, globals=None, locals=None, fromlist=(), level=0):
+            if level == 1 and "settings_window" in (fromlist or ()):
+                raise ImportError("No module named tkinter")
+            return real(name, globals, locals, fromlist, level)
+
+        with tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
+            with mock.patch.object(builtins, "__import__", fake), self.assertLogs("parley.tray_mode", "WARNING"):
+                app = self.make(tmp)
+            self.assertIsNone(app.settings_host)
+            app.open_settings()
+            balloons = [c for c in app.tray.calls if c[0] == "balloon"]
+            self.assertEqual(len(balloons), 1)
+            self.assertIn("Settings could not start", balloons[0][2])
 
     def test_restart_now_quits_and_relaunches_with_the_restarted_flag(self):
         with tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:

@@ -643,7 +643,19 @@ class SettingsWindow:
     def _restart_now(self) -> None:
         self.restart_btn.state(["disabled"])
         self.show_banner("ok", "Restarting...")
-        threading.Thread(target=self.host.restart, daemon=True, name="restart").start()
+        def work() -> None:
+            try:
+                self.host.restart()
+            except Exception:
+                log.exception("Restart failed")
+                ui.post(self._restart_failed)
+
+        threading.Thread(target=work, daemon=True, name="restart").start()
+
+    def _restart_failed(self) -> None:
+        if self.alive():
+            self.restart_btn.state(["!disabled"])
+            self.show_banner("error", "Parley couldn't restart. Close it from the tray menu and start it again.", restart_button=True)
 
     # ---- Save ----
     def save(self) -> None:
@@ -689,6 +701,8 @@ class SettingsWindow:
         if not wrote_config:
             return self.show_banner("error" if autostart_problem else "ok", prefix or "Applied.")
         if app is None:
+            if self.host.can_restart():  # the running copy already read its config; it will not see this save
+                return self.show_banner("warn", prefix + "Saved. Restart Parley to use it.", restart_button=True)
             return self.show_banner("ok", prefix + "Saved. These apply when Parley has started.")
         self.save_btn.state(["disabled"])
         self.show_banner("ok", "Applying...")

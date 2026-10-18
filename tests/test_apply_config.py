@@ -127,7 +127,7 @@ class ClassificationTests(unittest.TestCase):
 
     def test_api_key_is_never_applied(self):
         p = make_parley()
-        new = with_change("llm.api_key", "sk-ant-" "api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+        new = with_change("llm.api_key", "TESTKEY-not-a-real-secret-0123456789")
         self.assertEqual(p.apply_config(new), ([], []))
         self.assertEqual(p.cfg.llm.api_key, "")
 
@@ -203,6 +203,32 @@ class IdleTests(unittest.TestCase):
         self.assertEqual(p.deferred, [])
         self.assertEqual(p.hotkey.keys, ["f13"])
         self.assertEqual(p.cfg.audio.output_device, "Speakers")
+
+    def test_watcher_keeps_watching_when_busy_again_and_reports_applied(self):
+        p = make_parley(busy=True)
+        seen = []
+        p.on_applied = seen.append
+        real = p._apply_idle_changes
+        flips = [True]
+
+        def racy():  # busy again right after the watcher's own check, once
+            if flips and not p.is_busy():
+                flips.pop()
+                p._jobs.unfinished_tasks = 1
+            return real()
+
+        p._apply_idle_changes = racy
+        p.apply_config(with_change("hotkey.key", "f13"))
+        p._jobs.unfinished_tasks = 0
+        time.sleep(0.8)
+        self.assertTrue(p.deferred)  # raced: still waiting, watcher alive
+        p._jobs.unfinished_tasks = 0
+        end = time.monotonic() + 5
+        while p.deferred and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertEqual(p.hotkey.keys, ["f13"])
+        time.sleep(0.2)
+        self.assertEqual(seen, [p.cfg])  # the tray hears about the deferred change
 
     def test_a_later_save_replaces_a_waiting_change(self):
         p = make_parley(busy=True)

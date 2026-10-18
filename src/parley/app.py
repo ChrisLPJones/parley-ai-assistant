@@ -83,6 +83,7 @@ class Parley:
         self._restart_paths: set[str] = set()  # saved settings that only a restart applies
         self.deferred: list[str] = []  # settings waiting for the current answer to finish
         self._pending: dict = {"hotkey": None, "audio": {}}  # wanted hotkey / audio-device changes not applied yet
+        self.on_applied = None  # called with the config after a deferred change was applied (the tray updates its key name)
         self._watching = False  # the thread that applies them after the answer is running
 
     def is_current(self, turn: int) -> bool:
@@ -224,8 +225,15 @@ class Parley:
                 if self.is_busy():
                     continue
                 applied, restart = self._apply_idle_changes()
+                if self.deferred:  # went busy again between the check and the apply: keep watching
+                    continue
                 self._watching = False
             log.info("Applied after the answer: %s%s", applied, f"; restart needed for {restart}" if restart else "")
+            if self.on_applied is not None:
+                try:
+                    self.on_applied(self.cfg)
+                except Exception:
+                    log.debug("on_applied failed", exc_info=True)
             return
 
     def _make_recorder(self, device, preroll_ms: int) -> Recorder:

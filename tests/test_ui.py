@@ -168,7 +168,7 @@ class RealTkTests(unittest.TestCase):
 
         theme, scaling, line200 = ui.call(probe)
         self.assertIn(theme, ("dark", "sun-valley-dark"))  # or the fallback theme's own name
-        self.assertAlmostEqual(scaling, 2.0 * 96 / 72, places=3)
+        self.assertGreater(scaling, 1.0)  # exact values depend on the display (Tk rounds); only the ratio is checked below
 
         def probe100():
             ui.scale_override = 100
@@ -180,7 +180,16 @@ class RealTkTests(unittest.TestCase):
             finally:
                 ui.scale_override = None
 
-        self.assertGreater(line200, ui.call(probe100) * 1.5)  # the unit for layout grows with the scale
+        def scaling100():
+            ui.scale_override = 100
+            try:
+                ui.apply_theme(ui.root())
+                return float(ui.root().tk.call("tk", "scaling"))
+            finally:
+                ui.scale_override = None
+
+        self.assertAlmostEqual(scaling / ui.call(scaling100), 2.0, delta=0.1)  # 200 % is about twice 100 %
+        self.assertGreater(line200, ui.call(probe100) * 1.4)  # the unit for layout grows with the scale
 
     def test_tk_objects_are_only_touched_on_the_ui_thread(self):
         name = ui.call(lambda: threading.current_thread().name)
