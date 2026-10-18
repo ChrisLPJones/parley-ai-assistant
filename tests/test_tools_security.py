@@ -280,8 +280,9 @@ class SecretFiles(Base):
         (self.root / "sub" / "my.pem").write_text("k")
         import json
         out = json.loads(tools.find_files("*", str(self.root)))["matches"]
-        names = {os.path.relpath(m, self.root) for m in out}
-        self.assertIn(os.path.join("sub", "notes.txt"), names)
+        # Display paths are relative to the user's home, so don't depend on the base.
+        names = [m.replace("\\", "/") for m in out]
+        self.assertTrue(any(n.endswith("sub/notes.txt") for n in names), names)
         self.assertFalse([n for n in names if ".ssh" in n or n.endswith((".npmrc", ".pem"))], names)
 
     def test_find_files_in_secret_root_refused(self):
