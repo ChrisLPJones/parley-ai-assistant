@@ -1,0 +1,130 @@
+# Using Parley
+
+## First start
+
+Start Parley from the Start menu (see the [install steps](../README.md#install-on-windows)). The
+first run downloads several GB of models; the tray icon shows a grey ring and its tooltip and menu
+show the download progress. When it is ready the menu says "Ready - hold Pause to talk".
+
+On an NVIDIA GPU, Parley also downloads about 1.6 GB of CUDA libraries once, in the background. It
+keeps working on the CPU meanwhile and uses the GPU from the next start.
+
+## The tray icon
+
+Parley lives in the notification area (you may need to expand the hidden icons). The icon is a
+speech bubble whose colour and symbol show what Parley is doing:
+
+| State | Look | Meaning |
+|---|---|---|
+| Idle | grey bubble, white dot | Ready, waiting for you |
+| Listening | red bubble, pulsing dot | Recording while you hold the talk key |
+| Thinking | blue bubble, three moving dots | Transcribing and generating the answer |
+| Speaking | green bubble, moving bars | Reading the answer aloud |
+| Starting | grey bubble, ring | Starting up or downloading models |
+| Error | orange bubble, exclamation mark | Something went wrong; open the log folder |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/tray-icon-states.png">
+  <img alt="The tray icon in each state, at several sizes, on a dark and a light background" src="images/tray-icon-states.png">
+</picture>
+
+(The picture shows each state at several sizes on a dark and a light background; the small text in
+it is only a sheet label.)
+
+Left-click the icon, or choose **Settings**, to open the Settings window. Right-click for the menu:
+
+| Light | Dark |
+|---|---|
+| ![Tray menu, light](images/tray-menu-light.png) | ![Tray menu, dark](images/tray-menu-dark.png) |
+
+The menu shows the current status, then **Settings**, **Check for updates** (available in installed
+copies), **Open log folder** and **Quit**.
+
+## Talking
+
+1. Hold the talk key (default **Pause**) and speak. Short beeps (optional) mark the start and end.
+2. Release the key to send.
+3. Press the key again while Parley is talking to interrupt it; a new recording starts at once.
+
+## What you can ask
+
+Besides answering questions, Parley can act on your computer and look things up:
+
+- **"What's in here?" / "How many files are in this folder?"** with File Explorer open (counts, sizes, file types)
+- **"Read this"** with a file selected in Explorer, or "read notes.txt in Downloads"
+- **"Find my CV"**, **"Open Downloads"**, **"Open Spotify"**, **"Open youtube.com"**
+- **"What's the weather in Auckland?"** or anything current, via web search
+
+"This" and "here" mean the folder and selection in the File Explorer window you're using.
+Everything is read-only except opening things, and Parley only opens folders, documents, websites
+and Start menu apps, never scripts or programs by path. Files that may hold secrets (SSH keys,
+`.env`, credential stores) are off limits. Turn tools off with `[tools] enabled = false` in
+`config.toml` (see [Configuration](CONFIGURATION.md)).
+
+## The Settings window
+
+Most changes apply at once. When one needs a restart, the window says so and offers **Restart now**.
+Use **Save** to apply and **Close** to leave.
+
+**General**
+
+| Light | Dark |
+|---|---|
+| ![General page, light](images/settings-general-light.png) | ![General page, dark](images/settings-general-dark.png) |
+
+- **Talk key:** click **Press a key** and press the key you want.
+- **Microphone** and **Speaker:** pick a device, or leave "System default".
+- **Beeps:** short beeps when recording starts and stops.
+- **Start with Windows:** start Parley in the notification area when you sign in (installed copies only).
+- **Check for updates:** look for a newer version after startup (installed copies only); Parley asks before installing.
+
+**Voice**
+
+| Light | Dark |
+|---|---|
+| ![Voice page, light](images/settings-voice-light.png) | ![Voice page, dark](images/settings-voice-dark.png) |
+
+Pick a voice from the list (grouped by accent and gender), set the speaking speed (1 is normal) and
+press **Play sample** to hear it.
+
+## Cloud backends and API keys
+
+By default everything runs locally. For smarter answers you can use Anthropic or OpenAI for the LLM
+step; speech recognition and the voice stay local, and only transcribed text and tool output are
+sent. Choose the backend in `config.toml` (`[llm] backend = "anthropic"` or `"openai"`), then save
+your key from a terminal:
+
+```
+parley --set-key anthropic
+```
+
+(or `openai`; what you type is hidden). The key goes into the Windows credential store, not a file.
+`parley --key-status` shows what is saved and `parley --delete-key anthropic` removes it. For an
+installed copy run these through `parley-app.exe` in `%LOCALAPPDATA%\Programs\Parley\app\<version>\`.
+More in [Configuration](CONFIGURATION.md#cloud-backends).
+
+## Changing the talk key on laptops without Pause
+
+Most laptops have no Pause key. Open Settings, **General**, click **Press a key** and press another
+key, for example F13, Scroll Lock or Right Ctrl. Alternatively set `[hotkey] key = "f13"` (or
+`"scroll_lock"`, `"ctrl_r"`) in `config.toml`.
+
+## Troubleshooting
+
+- **Nothing happens when you speak:** check the talk key and your microphone in Settings. From a
+  terminal, `parley --test-mic` tests the mic and `parley --list-devices` lists devices.
+- **Garbled or nonsense answers on a GPU without a crash (for example Vulkan):** set `runtime = "cpu"` under `[llm]`.
+- **Orange error icon or Parley will not start:** choose **Open log folder** from the tray menu.
+- **Windows warns about the installer:** it is unsigned; see the [install steps](../README.md#install-on-windows).
+
+## Logs
+
+The tray app writes `%LOCALAPPDATA%\parley\logs\parley.log` (menu: **Open log folder**). The local LLM
+writes `llama-server.log` in the same folder. Run from source with `-v` for debug logging and
+latency timings.
+
+## Updates
+
+Installed copies look for a newer version after startup and ask before installing; **Check for
+updates** in the tray menu checks on demand, and Settings can turn the check off. Running a newer
+installer also upgrades in place. Your models and settings are never touched by an update or an uninstall.
