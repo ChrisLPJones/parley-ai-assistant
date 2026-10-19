@@ -158,7 +158,8 @@ class TrayApp:
             self.settings_host = settings_window.Host(
                 args.config or config.default_config_path(),
                 get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
-                get_hotkey=lambda: self.hotkey, on_applied=self._on_applied, models_api=self.models)
+                get_hotkey=lambda: self.hotkey, on_applied=self._on_applied, models_api=self.models,
+                keys_api=credstore.default_store())
         except ImportError as e:
             log.warning("Settings are unavailable: %s", e)
         self.app = self.flow = self.hotkey = None

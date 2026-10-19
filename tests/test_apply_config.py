@@ -106,6 +106,8 @@ class ClassificationTests(unittest.TestCase):
                 continue
             with self.subTest(setting=s.path, mode=s.apply):
                 p = make_parley()
+                started = []
+                p._start_llm_reload = started.append  # never load a real language model here
                 before = get(p.cfg, s.path)
                 new_value = other(s, before)
                 applied, restart = p.apply_config(with_change(s.path, new_value))
@@ -120,7 +122,15 @@ class ClassificationTests(unittest.TestCase):
                     self.assertEqual((applied, restart), ([s.path], []))
                     self.assertEqual(get(p.cfg, s.path), new_value)
                     self.assertTrue(p.made)
-                else:  # restart (and, until their machinery lands, rebuild_chat / reload_llm)
+                elif s.apply in (S.REBUILD_CHAT, S.RELOAD_LLM):  # a new Chat is built in the background from a candidate copy
+                    self.assertEqual((applied, restart), ([], []))
+                    self.assertEqual(len(started), 1)
+                    self.assertEqual(started[0]["paths"], [s.path])
+                    table = "tools" if s.path.startswith("tools.") else "llm"
+                    self.assertEqual(getattr(started[0][table], s.path.split(".")[1]), new_value)
+                    self.assertEqual(get(p.cfg, s.path), before)  # the running value changes only when the new one loaded
+                    self.assertEqual(p.restart_pending(), [])
+                else:  # restart
                     self.assertEqual((applied, restart), ([], [s.path]))
                     self.assertEqual(get(p.cfg, s.path), before)  # the running value is not faked
                     self.assertEqual(p.restart_pending(), [s.path])
@@ -243,6 +253,227 @@ class IdleTests(unittest.TestCase):
     def test_live_settings_apply_even_while_busy(self):
         p = make_parley(busy=True)
         self.assertEqual(p.apply_config(with_change("tts.speed", 1.5)), (["tts.speed"], []))
+
+
+class FakeChat:
+    def __init__(self, name, fail=None):
+        self.name, self.fail, self.cfg = name, fail, None
+        self.provider = SimpleNamespace(describe=lambda: name, cfg=None)
+        self.history = [{"role": "user", "content": "hi"}] if name == "old" else []
+
+    def warm_up(self):
+        if self.fail:
+            raise self.fail
+
+    def rebind(self, cfg):
+        self.cfg = self.provider.cfg = cfg
+
+
+SECRET = "sk-ant-" "api03-TESTKEY0123456789abcdef"
+
+
+class ReloadTests(unittest.TestCase):
+    """reload_llm / rebuild_chat / key_changed with a fake create_chat and a fake llama-server (no model, no network)."""
+
+    def setUp(self):
+        self.p = make_parley()
+        self.old = self.p.chat = FakeChat("old")
+        self.built, self.fail, self.gate = [], None, None
+        self.starts, self.stops = [], []
+
+        def create(llm, tools, base_url=None, local_model="local"):
+            if self.gate is not None:
+                self.gate.wait(5)
+            chat = FakeChat(f"new-{llm.backend}-{llm.model or '-'}", self.fail)
+            self.built.append((llm, tools, base_url, local_model, chat))
+            return chat
+
+        def start(llm, home):
+            self.starts.append(llm.think)
+            return f"http://127.0.0.1:{9000 + len(self.starts)}/v1", "model"
+
+        for patcher in (mock.patch("parley.app.create_chat", side_effect=create),
+                        mock.patch("parley.llama_server.start", side_effect=start),
+                        mock.patch("parley.llama_server.stop", side_effect=lambda url: self.stops.append(url))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def wait_for(self, want, timeout=5):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.p.llm_state[0] in want:
+                return self.p.llm_state
+            time.sleep(0.02)
+        self.fail(f"llm_state stayed {self.p.llm_state}")
+
+    def test_idle_change_swaps_in_a_new_chat_and_mutates_the_shared_config(self):
+        shared = self.p.cfg.llm
+        self.p.apply_config(with_change("llm.model", "gpt-test"))
+        self.assertEqual(self.wait_for(("done", "error"))[0], "done")
+        self.assertIsNot(self.p.chat, self.old)
+        self.assertEqual(self.p.chat.history, [])  # history starts fresh
+        self.assertIs(self.p.cfg.llm, shared)
+        self.assertEqual(shared.model, "gpt-test")
+        self.assertIs(self.p.chat.cfg, shared)  # live settings keep working through the new Chat
+        self.assertEqual(self.p.restart_pending(), [])
+        self.assertEqual(self.p.deferred, [])
+
+    def test_tools_change_rebuilds_with_the_new_tools_config(self):
+        self.p.apply_config(with_change("tools.web_search", False))
+        self.wait_for(("done", "error"))
+        self.assertFalse(self.built[0][1].web_search)
+        self.assertFalse(self.p.cfg.tools.web_search)
+
+    def test_failure_keeps_the_old_chat_and_says_so_in_a_plain_sentence(self):
+        self.fail = SystemExit(f"backend rejected {SECRET}")
+        self.p.apply_config(with_change("llm.model", "gpt-test"))
+        state, text = self.wait_for(("done", "error"))
+        self.assertEqual(state, "error")
+        self.assertIs(self.p.chat, self.old)
+        self.assertEqual(self.p.cfg.llm.model, "")  # the running config is untouched
+        self.assertEqual(self.p.restart_pending(), ["llm.model"])
+        self.assertNotIn(SECRET, text)
+        self.assertFalse(self.p._llm_loading)
+        # the next save can try again
+        self.fail = None
+        self.p.apply_config(with_change("llm.model", "gpt-test2"))
+        self.assertEqual(self.wait_for(("done",))[0], "done")
+        self.assertEqual(self.p.restart_pending(), [])
+
+    def test_failure_text_never_carries_an_unexpected_exception_message(self):
+        self.fail = RuntimeError(f"upstream said {SECRET}")
+        self.p.apply_config(with_change("llm.model", "x"))
+        state, text = self.wait_for(("error",))
+        self.assertNotIn(SECRET, text)
+        self.assertIn("RuntimeError", text)
+
+    def test_busy_defers_until_the_answer_ends(self):
+        self.p = p = make_parley(busy=True)
+        p.chat = self.old
+        applied, restart = p.apply_config(with_change("llm.model", "x"))
+        self.assertEqual((applied, restart), ([], []))
+        self.assertEqual(p.deferred, ["llm.model"])
+        time.sleep(0.5)
+        self.assertEqual(self.built, [])  # nothing started during the answer
+        self.assertIs(p.chat, self.old)
+        p._jobs.unfinished_tasks = 0
+        self.assertEqual(self.wait_for(("done",))[0], "done")
+        self.assertEqual(p.deferred, [])
+
+    def test_swap_waits_when_an_answer_starts_while_the_new_chat_loads(self):
+        self.gate = threading.Event()
+        self.p.apply_config(with_change("llm.model", "x"))
+        self.assertEqual(self.p.llm_state[0], "loading")
+        self.p._jobs.unfinished_tasks = 1  # the user asks something meanwhile
+        self.gate.set()
+        time.sleep(0.6)
+        self.assertIs(self.p.chat, self.old)  # the old Chat finishes its answer first
+        self.assertEqual(self.p.llm_state[0], "loading")
+        self.p._jobs.unfinished_tasks = 0
+        self.assertEqual(self.wait_for(("done",))[0], "done")
+
+    def test_a_second_save_waits_for_the_load_in_progress(self):
+        self.gate = threading.Event()
+        self.p.apply_config(with_change("llm.model", "first"))
+        self.p.apply_config(with_change("llm.model", "second"))
+        self.assertEqual(self.p.deferred, ["llm.model"])
+        self.assertEqual(len(self.built), 0)
+        self.gate.set()
+        end = time.monotonic() + 5
+        while len(self.built) < 2 and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertEqual([b[0].model for b in self.built], ["first", "second"])
+        self.wait_for(("done",))
+
+    def test_builtin_starts_a_new_server_only_when_its_settings_changed(self):
+        p = self.p
+        p._server = ("http://127.0.0.1:9000/v1", "model")
+        p.apply_config(with_change("llm.think", True))  # a llama-server flag
+        self.wait_for(("done",))
+        self.assertEqual(self.starts, [True])
+        self.assertEqual(p._server[0], "http://127.0.0.1:9001/v1")
+        self.assertEqual(self.stops, ["http://127.0.0.1:9000/v1"])  # the old one stops only after the swap
+        self.assertEqual(self.built[-1][2], "http://127.0.0.1:9001/v1")
+        p.llm_state = ("idle", "")
+        new = copy.deepcopy(p.cfg)
+        new.tools.web_search = False  # a Chat-only change reuses the running server
+        p.apply_config(new)
+        self.wait_for(("done",))
+        self.assertEqual(self.starts, [True])
+        self.assertEqual(self.built[-1][2], "http://127.0.0.1:9001/v1")
+        self.assertEqual(self.stops, ["http://127.0.0.1:9000/v1"])
+
+    def test_failure_stops_a_server_it_started_and_keeps_the_old_one(self):
+        p = self.p
+        p._server = ("http://127.0.0.1:9000/v1", "model")
+        self.fail = RuntimeError("llama-server exited during startup")
+        p.apply_config(with_change("llm.think", True))
+        self.wait_for(("error",))
+        self.assertEqual(self.stops, ["http://127.0.0.1:9001/v1"])
+        self.assertEqual(p._server, ("http://127.0.0.1:9000/v1", "model"))
+        self.assertIs(p.chat, self.old)
+
+    def test_switching_to_a_cloud_backend_stops_the_builtin_server_after_the_swap(self):
+        p = self.p
+        p._server = ("http://127.0.0.1:9000/v1", "model")
+        p.apply_config(with_change("llm.backend", "anthropic"))
+        self.wait_for(("done",))
+        self.assertEqual(self.starts, [])
+        self.assertIsNone(p._server)
+        self.assertEqual(self.stops, ["http://127.0.0.1:9000/v1"])
+
+    def test_key_changed_rebuilds_only_when_that_backend_runs(self):
+        p = self.p
+        p.cfg.llm.backend = "anthropic"
+        p.key_changed("openai")
+        time.sleep(0.2)
+        self.assertEqual(self.built, [])
+        p.key_changed("anthropic")
+        self.assertEqual(self.wait_for(("done",))[0], "done")
+        self.assertEqual(len(self.built), 1)
+        self.assertEqual(self.starts, [])
+        self.assertIsNot(p.chat, self.old)
+        self.assertFalse(p._key_dirty)
+
+    def test_key_changed_while_busy_waits_for_the_answer(self):
+        self.p = p = make_parley(busy=True)
+        p.chat = self.old
+        p.cfg.llm.backend = "anthropic"
+        p.key_changed("anthropic")
+        time.sleep(0.4)
+        self.assertEqual(self.built, [])
+        p._jobs.unfinished_tasks = 0
+        self.assertEqual(self.wait_for(("done",))[0], "done")
+
+    def test_the_swap_never_copies_an_api_key_into_the_running_config(self):
+        new = with_change("llm.model", "x")
+        new.llm.api_key = SECRET
+        self.p.apply_config(new)
+        self.wait_for(("done",))
+        self.assertEqual(self.p.cfg.llm.api_key, "")
+
+
+class DescribeFailureTests(unittest.TestCase):
+    def test_sentences(self):
+        import httpx
+        from parley.app import describe_failure
+
+        self.assertEqual(describe_failure(SystemExit("Anthropic rejected the API key.")), "Anthropic rejected the API key.")
+        self.assertIn("connect", describe_failure(httpx.ConnectError(f"boom {SECRET}")))
+        self.assertIn("built-in", describe_failure(RuntimeError("llama-server exited during startup:\n  tail")))
+        self.assertEqual(describe_failure(KeyError(SECRET)), "The language model could not be loaded (KeyError).")
+        self.assertNotIn("startup", describe_failure(RuntimeError("llama-server exited during startup:\n  tail")))
+        self.assertIn("not set up", describe_failure(SystemExit(2)))
+
+    def test_key_shapes_are_scrubbed_even_from_our_own_sentences(self):
+        from parley.app import describe_failure
+
+        for text in (f"The server rejected {SECRET} today", "bad key " + "sk-" + "proj-" + "x" * 20 + " here"):
+            out = describe_failure(SystemExit(text))
+            self.assertNotIn("sk-", out)
+            self.assertIn("[key]", out)
+        self.assertEqual(describe_failure(SystemExit("task-queue-name failed")), "task-queue-name failed")
+        self.assertLessEqual(len(describe_failure(SystemExit("x" * 900))), 200)
 
 
 class PreviewTests(unittest.TestCase):

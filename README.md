@@ -102,7 +102,7 @@ page fetches go online; they are on by default and `web_search = false` under `[
 off. Models are downloaded on first run. If you choose the Anthropic or OpenAI backend, **only the
 transcribed text and tool output leave your machine** (never audio), including anything a tool reads for the
 conversation, such as the contents of a file you asked about. API keys are kept in the Windows
-credential store, never in a file. Tools are read-only except opening things, and files that may hold
+credential store, never in a file (Settings > LLM only ever shows "Saved", never the key). Tools are read-only except opening things, and files that may hold
 secrets (SSH keys, `.env`, credential stores) are off limits.
 
 ## More

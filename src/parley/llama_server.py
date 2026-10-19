@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -317,8 +318,30 @@ def _wait_ready(proc: subprocess.Popen, url: str, log_path: Path) -> None:
         time.sleep(0.25)
 
 
+_servers: dict[str, subprocess.Popen] = {}  # base URL (as start() returns it) -> the running llama-server
+_servers_lock = threading.Lock()
+
+
+def stop(base_url: str | None) -> bool:
+    """Stop the llama-server that start() returned `base_url` for (a reload replaced it). False if it is unknown or already gone."""
+    with _servers_lock:
+        proc = _servers.pop(base_url or "", None)
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except OSError:
+        return False
+    log.info("Stopped the previous LLM server")
+    return True
+
+
 def start(cfg: LlmConfig, home: Path) -> tuple[str, str]:
-    """Start llama-server and wait until the model is loaded. Returns (OpenAI-style base URL, model name)."""
+    """Start llama-server and wait until the model is loaded. Returns (OpenAI-style base URL, model name).
+    `stop(base_url)` stops it again."""
     runtime = resolve_runtime(cfg)
     exe = ensure_runtime(home, runtime)
     model = ensure_model(cfg, home)
@@ -338,4 +361,6 @@ def start(cfg: LlmConfig, home: Path) -> tuple[str, str]:
         proc, url = _launch(exe, model, cfg, runtime, log_path)
         _wait_ready(proc, url, log_path)
     log.info("LLM server up: %s on %s (%.1fs, log %s)", model.name, runtime, time.perf_counter() - start_time, log_path)
+    with _servers_lock:
+        _servers[url + "/v1"] = proc
     return url + "/v1", model.stem

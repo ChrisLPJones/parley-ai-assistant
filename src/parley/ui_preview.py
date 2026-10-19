@@ -1,12 +1,13 @@
 """Open the REAL settings window against a stub app and a throwaway home: no models, no microphone, no audio.
 
-    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice|models]
-                                [--state restart-needed|error|downloading|download-error] [--auto-close SECONDS] [--smoke]
+    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice|models|llm]
+                                [--state restart-needed|error|downloading|download-error|key-saved|llm-error] [--auto-close SECONDS] [--smoke]
 
 For looking at the window (and for scripts/shot_window.py). `PARLEY_HOME` is forced to a temp folder named
 `parley_test_ui_preview_*`, so Save writes a real config.toml there and nothing else is touched; the autostart control
 uses an in-memory fake. The Models page runs against `StubModels` (fake files, a simulated download, no network).
-`--smoke` opens the window, checks it exists and exits 0.
+The LLM page runs against an in-memory key store (the Windows credential store is never touched) and a stub app whose
+language model "loads" for 1.5 s. `--smoke` opens the window, checks it exists and exits 0.
 """
 import argparse
 import logging
@@ -26,6 +27,7 @@ KOKORO_VOICES = (
     "hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola jf_alpha jf_gongitsune jf_nezumi jf_tebukuro jm_kumo "
     "pf_dora pm_alex pm_santa zf_xiaobei zf_xiaoni zf_xiaoxiao zf_xiaoyi zm_yunjian zm_yunxi zm_yunxia zm_yunyang").split()
 CONFIG_TEXT = "# Parley settings (preview)\n[tts]\nvoice = \"af_heart\"  # my favourite\nspeed = 1.1\n"
+LLM_CONFIG_TEXT = CONFIG_TEXT + "[llm]\nbackend = \"anthropic\"\n"  # the LLM page opens on a backend that needs a key
 
 
 def throwaway_home() -> tuple[Path, bool]:
@@ -70,6 +72,32 @@ class FakeHotkey:
                 if self._capture is cb:
                     cb(0x7C)
             threading.Timer(1.0, press).start()
+
+
+class FakeKeyBackend:
+    """An in-memory credential store backend: the preview and the tests never touch the Windows Credential Manager."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.items: dict[str, str] = {}
+        self.fail = fail
+
+    def read(self, target):
+        return self.items.get(target)
+
+    def write(self, target, secret):
+        from . import credstore
+
+        if self.fail:
+            raise credstore.CredentialError("The Windows credential store failed to save a key (error 5).")
+        self.items[target] = secret
+
+    def delete(self, target):
+        return self.items.pop(target, None) is not None
+
+
+def fake_key_check(backend: str, key: str) -> str:
+    time.sleep(0.8)  # looks like a network request; nothing is sent
+    return "The provider accepted this key." if key else "There is no key to test."
 
 
 class StubModels:
@@ -172,8 +200,11 @@ def stub_hardware(language: str = "en"):
 class StubApp:
     """The parts of `Parley` the window uses. `apply_config` classifies like the real one (by the schema), nothing runs."""
 
-    def __init__(self, cfg, restart_pending=()) -> None:
+    def __init__(self, cfg, restart_pending=(), fail_llm: bool = False) -> None:
         self.cfg = cfg
+        self.fail_llm = fail_llm
+        self.llm_state: tuple[str, str] = ("idle", "")
+        self.keys_changed: list[str] = []
         self.deferred: list[str] = []
         self._pending = list(restart_pending)
         self._busy_until = 0.0
@@ -195,24 +226,49 @@ class StubApp:
     def restart_pending(self) -> list[str]:
         return list(self._pending)
 
+    def _fake_load(self, paths) -> None:
+        """Pretend to load a language model for 1.5 s, then succeed (or fail, in the llm-error state)."""
+        self.llm_state = ("loading", "")
+
+        def done() -> None:
+            if self.fail_llm:
+                self.llm_state = ("error", "Anthropic rejected the API key (replace it on the LLM page).")
+                for p in paths:
+                    if p not in self._pending:
+                        self._pending.append(p)
+            else:
+                self.llm_state = ("done", "")
+
+        threading.Timer(1.5, done).start()
+
+    def key_changed(self, backend: str) -> None:
+        self.keys_changed.append(backend)
+        self._fake_load(["llm.api_key"])
+
     def apply_config(self, new):
         from . import settings_schema as S
 
-        applied, restart = [], []
+        applied, restart, llm = [], [], []
         for s in S.SETTINGS:
             table, key = s.path.split(".")
-            if getattr(getattr(self.cfg, table), key) == getattr(getattr(new, table), key):
+            if s.path == "llm.api_key" or getattr(getattr(self.cfg, table), key) == getattr(getattr(new, table), key):
                 continue
-            (restart if s.apply in (S.RESTART, S.REBUILD_CHAT, S.RELOAD_LLM) else applied).append(s.path)
+            if s.apply in (S.REBUILD_CHAT, S.RELOAD_LLM):
+                llm.append(s.path)
+            else:
+                (restart if s.apply == S.RESTART else applied).append(s.path)
         for p in restart:
             if p not in self._pending:
                 self._pending.append(p)
+        if llm:
+            self.llm_state = ("pending", "")
+            self._fake_load(llm)
         return applied, restart
 
 
-def build_host(state: str | None = None, *, home: Path | None = None, models_state: str | None = None):
-    """(host, home, created). The stub app is `host.app`."""
-    from . import config, settings_window
+def build_host(state: str | None = None, *, home: Path | None = None, models_state: str | None = None, page: str | None = None):
+    """(host, home, created). The stub app is `host.app`; `host.keys` is an in-memory credential store."""
+    from . import config, credstore, settings_window
 
     created = False
     if home is None:
@@ -220,8 +276,11 @@ def build_host(state: str | None = None, *, home: Path | None = None, models_sta
     os.environ["PARLEY_HOME"] = str(home)
     cfg_path = home / "config.toml"
     if not cfg_path.exists():
-        cfg_path.write_text(CONFIG_TEXT, encoding="utf-8")
-    app = StubApp(config.load(cfg_path), ["stt.model", "tts.device"] if state == "restart-needed" else ())
+        cfg_path.write_text(LLM_CONFIG_TEXT if page == "llm" else CONFIG_TEXT, encoding="utf-8")
+    app = StubApp(config.load(cfg_path), ["stt.model", "tts.device"] if state == "restart-needed" else (), fail_llm=state == "llm-error")
+    keys = credstore.CredStore(FakeKeyBackend(), prefix="Parley-preview")
+    if state == "key-saved":
+        keys.set("anthropic", "PREVIEW-not-a-real-key-0123456789")
     error = "The speech model could not be loaded. Check stt.model in config.toml." if state == "error" else None
     names = {"input": ["Microphone (USB Audio Device)", "Headset Microphone (Realtek Audio)", "Line In (Realtek Audio)"],
              "output": ["Speakers (Realtek Audio)", "Headphones (USB Audio Device)", "Monitor (HDMI Audio)"]}
@@ -230,7 +289,7 @@ def build_host(state: str | None = None, *, home: Path | None = None, models_sta
                                 restart=lambda: print("Restart now clicked (preview: nothing restarts)"),
                                 get_hotkey=lambda: hotkey, list_devices=lambda kind: names[kind],
                                 autostart_api=FakeAutostart(), models_api=StubModels(models_state, home),
-                                detect_hardware=stub_hardware)
+                                detect_hardware=stub_hardware, keys_api=keys, key_check=fake_key_check)
     return host, home, created
 
 
@@ -238,9 +297,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m parley.ui_preview", description=__doc__.split("\n")[0])
     p.add_argument("--theme", choices=("light", "dark"), help="default: follow Windows")
     p.add_argument("--scale", type=int, choices=(100, 125, 150, 175, 200), help="default: the system's DPI scaling")
-    p.add_argument("--page", choices=("general", "voice", "models"), default="general")
-    p.add_argument("--state", choices=("restart-needed", "error", "downloading", "download-error"),
-                   help="open with that banner showing (models page: a download at 43 %% or a failed one; default downloading)")
+    p.add_argument("--page", choices=("general", "voice", "models", "llm"), default="general")
+    p.add_argument("--state", choices=("restart-needed", "error", "downloading", "download-error", "key-saved", "llm-error"),
+                   help="open with that banner showing (models page: a download at 43 %% or a failed one, default downloading; "
+                        "llm page: a key already saved, or a language model that fails to load after Save; no key saved by default)")
     p.add_argument("--auto-close", type=float, metavar="SECONDS", help="close the window after this long")
     p.add_argument("--smoke", action="store_true", help="open the window, check it exists, exit 0")
     args = p.parse_args(argv)
@@ -248,9 +308,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import settings_window, ui
 
-    banner_state = args.state if args.state in ("restart-needed", "error") else None
+    banner_state = args.state if args.state in ("restart-needed", "error", "key-saved", "llm-error") else None
     models_state = args.state if args.state in ("downloading", "download-error") else ("downloading" if args.page == "models" else None)
-    host, home, created = build_host(banner_state, models_state=models_state)
+    host, home, created = build_host(banner_state, models_state=models_state, page=args.page)
     print(f"ui_preview: throwaway home {home}")
     ui.theme_override, ui.scale_override = args.theme, args.scale
     t0 = time.monotonic()

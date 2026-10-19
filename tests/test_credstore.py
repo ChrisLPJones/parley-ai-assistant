@@ -30,6 +30,7 @@ class FakeBackend:
     def __init__(self):
         self.items: dict[str, str] = {}
         self.fail_write = self.fail_read = self.corrupt_write = False
+        self.corrupt_next = False  # corrupt only the next write (a restore afterwards works)
 
     def read(self, target):
         if self.fail_read:
@@ -39,7 +40,8 @@ class FakeBackend:
     def write(self, target, blob):
         if self.fail_write:
             raise CredentialError("write failed")
-        self.items[target] = "corrupted" if self.corrupt_write else blob
+        bad, self.corrupt_next = self.corrupt_write or self.corrupt_next, False
+        self.items[target] = "corrupted" if bad else blob
 
     def delete(self, target):
         return self.items.pop(target, None) is not None
@@ -445,6 +447,153 @@ class CliTests(Base):
         out = io.StringIO()
         credstore.cli_delete_key("anthropic", self.store, out, err)
         self.assertIn("No saved", out.getvalue())
+
+
+class ReviewFixTests(Base):
+    """PR #13 review LOWs, fixed with the LLM page."""
+
+    def test_redaction_needs_a_left_boundary_for_sk(self):
+        self.assertEqual(credstore.redact("task-queue-name and risk-assessment-run"), "task-queue-name and risk-assessment-run")
+        self.assertEqual(credstore.redact(f"key={OAI}"), "key=[key]")
+        self.assertEqual(credstore.redact(f"({OAI})"), "([key])")
+
+    def test_pywin32_error_without_args_is_not_an_index_error(self):
+        backend = credstore.WinBackend.__new__(credstore.WinBackend)
+
+        class Boom(Exception):
+            def __init__(self):
+                self.args = ()
+
+        backend._w = mock.Mock(CRED_TYPE_GENERIC=1, CRED_PERSIST_LOCAL_MACHINE=2)
+        backend._w.CredRead.side_effect = Boom()
+        backend._w.CredDelete.side_effect = Boom()
+        backend._w.CredWrite.side_effect = Boom()
+        for call in (lambda: backend.read("t"), lambda: backend.delete("t"), lambda: backend.write("t", "x")):
+            with self.assertRaises(CredentialError) as cm:
+                call()
+            self.assertIn("error ?", str(cm.exception))
+        backend._w.CredRead.side_effect = OSError(credstore._ERROR_NOT_FOUND, "x")
+        self.assertIsNone(backend.read("t"))
+
+    def test_replace_key_restores_the_old_key_after_a_read_back_mismatch(self):
+        self.store.set("anthropic", KEY)
+        self.backend.corrupt_next = True
+        with self.assertRaises(CredentialError) as cm:
+            credstore.replace_key(self.store, "anthropic", OAI)
+        self.assertEqual(self.store.get("anthropic"), KEY)
+        self.assertNotIn(OAI, str(cm.exception) + self.logs.text)
+
+    def test_replace_key_leaves_no_entry_when_there_was_none(self):
+        self.backend.corrupt_write = True
+        with self.assertRaises(CredentialError):
+            credstore.replace_key(self.store, "openai", OAI)
+        self.assertEqual(self.backend.items, {})
+
+    def test_replace_key_registers_the_secret_for_redaction(self):
+        credstore.replace_key(self.store, "openai", "plain-new-secret-123")
+        self.assertEqual(credstore.redact("x plain-new-secret-123 y"), "x [key] y")
+
+    def test_cli_set_key_mismatch_keeps_the_old_key(self):
+        self.store.set("anthropic", KEY)
+        self.backend.corrupt_next = True
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("getpass.getpass", return_value=OAI):
+            self.assertEqual(credstore.cli_set_key("anthropic", self.store, out, err), 1)
+        self.assertEqual(self.store.get("anthropic"), KEY)
+        self.assertNotIn(OAI, out.getvalue() + err.getvalue())
+
+    def test_migration_race_keeps_the_store_entry_when_the_other_instance_already_removed_the_line(self):
+        self.path.write_text(f'[llm]\nbackend = "anthropic"\napi_key = "{KEY}"\n', "utf-8")
+
+        def other_instance_then_fail(path, changes):  # instance B removed the line, then our own write failed
+            Path(path).write_text('[llm]\nbackend = "anthropic"\n', "utf-8")
+            raise OSError("disk full")
+
+        with mock.patch("parley.config_io.save_changes", side_effect=other_instance_then_fail):
+            self.assertEqual(credstore.migrate_legacy_key(self.path, self.store), credstore.FAILED)
+        self.assertEqual(self.store.get("anthropic"), KEY, "the store entry is now the only copy")
+
+    def test_a_401_from_the_provider_is_not_repeated_because_it_can_quote_the_key(self):
+        import httpx
+        from parley import llm
+
+        provider = object.__new__(llm.OpenAICompatibleProvider)
+        provider.cloud = True
+        body = {"error": {"message": f"Incorrect API key provided: {OAI}."}}
+        with self.assertRaises(SystemExit) as cm:
+            provider._check(httpx.Response(401, json=body))
+        self.assertEqual(str(cm.exception), "OpenAI rejected the API key.")
+
+    def test_chat_rebind_points_the_chat_and_its_provider_at_the_shared_config(self):
+        from parley import llm
+
+        provider = mock.Mock()
+        chat = llm.Chat(config.LlmConfig(), provider, False)
+        shared = config.LlmConfig()
+        chat.rebind(shared)
+        self.assertIs(chat.cfg, shared)
+        self.assertIs(provider.cfg, shared)
+
+    def test_endpoint_warning_cases(self):
+        w = credstore.endpoint_warning
+        self.assertIsNone(w("openai", ""))
+        self.assertIsNone(w("openai", "https://api.openai.com/v1"))
+        self.assertIsNone(w("server", "http://127.0.0.1:8080/v1", loopback_ok=True))
+        self.assertIsNone(w("ollama", "http://localhost:11434", loopback_ok=True, host_check=False))
+        # http:// to a non-loopback host is flagged even for the provider's own host name (the old check stayed silent)
+        self.assertIn("unencrypted", w("openai", "http://api.openai.com/v1"))
+        self.assertIn("unencrypted", w("server", "http://192.168.1.20:8080/v1", loopback_ok=True, host_check=False))
+        self.assertIn("proxy.example.com", w("openai", "https://proxy.example.com/v1"))
+        self.assertNotIn("secret", w("openai", "https://user:secret@proxy.example.com/v1"))
+        self.logs.lines.clear()
+        credstore.warn_if_custom_endpoint("openai", "http://api.openai.com/v1")
+        self.assertIn("unencrypted", self.logs.text)
+
+
+class CheckKeyTests(Base):
+    def get(self, status=200, exc=None):
+        calls = []
+
+        def fake(url, **kw):
+            calls.append((url, kw))
+            if exc:
+                raise exc
+            return mock.Mock(status_code=status)
+
+        return fake, calls
+
+    def test_one_get_to_the_providers_own_host_without_redirects_or_proxy(self):
+        import httpx
+
+        for backend, host in (("anthropic", "api.anthropic.com"), ("openai", "api.openai.com")):
+            fake, calls = self.get()
+            text = credstore.check_key(backend, KEY, get=fake)
+            self.assertEqual(text, "The provider accepted this key.")
+            self.assertEqual(len(calls), 1)
+            url, kw = calls[0]
+            self.assertTrue(url.startswith(f"https://{host}/"))
+            self.assertIs(kw["follow_redirects"], False)
+            self.assertIs(kw["trust_env"], False)
+            self.assertNotIn(KEY, url)
+        import inspect
+        params = inspect.signature(httpx.get).parameters  # the real function must accept what we pass
+        self.assertTrue({"follow_redirects", "trust_env", "timeout", "headers"} <= set(params))
+
+    def test_results_are_plain_sentences_and_never_hold_the_key(self):
+        import httpx
+
+        for status, expect in ((200, "accepted"), (401, "rejected"), (403, "rejected"), (500, "HTTP 500")):
+            fake, _ = self.get(status)
+            text = credstore.check_key("openai", OAI, get=fake)
+            self.assertIn(expect, text)
+            self.assertNotIn(OAI, text)
+        fake, _ = self.get(exc=httpx.ConnectError(f"failed for {OAI}"))
+        text = credstore.check_key("openai", OAI, get=fake)
+        self.assertIn("Couldn't reach api.openai.com", text)
+        self.assertNotIn(OAI, text + self.logs.text)
+        self.assertEqual(credstore.check_key("openai", "", get=fake), "There is no key to test.")
+        self.assertEqual(credstore.check_key("server", KEY, get=fake), "There is no key to test.")
+        self.assertNotIn(KEY, self.logs.text)
 
 
 class RealCredentialManagerTests(unittest.TestCase):

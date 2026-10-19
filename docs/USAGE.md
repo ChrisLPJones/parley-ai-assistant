@@ -101,18 +101,37 @@ can still be tried, at your own risk.
 
 - **Download:** fetches the selected model and checks it. A bar shows the progress; **Cancel** stops it and keeps what
   was downloaded so the next download continues. One download runs at a time, and it carries on if you close Settings.
-- **Use:** chooses a language model. Press **Save**, then restart Parley: the language model changes after a restart. If you set your own model
-  (a custom repo, file or path), this replaces that setting when you press **Save**.
+- **Use:** chooses a language model. Press **Save**: Parley loads it in the background and switches when it is ready (the
+  previous one keeps answering until then). If you set your own model (a custom repo, file or path), this replaces that
+  setting when you press **Save**.
 - **Delete:** removes a downloaded model after you confirm. The model in use can't be deleted.
 
-Choosing and downloading speech and voice models from this page is coming in the next update; for now they are listed only.
+**LLM**
+
+Where answers come from: **Built-in** (the model chosen on the Models page), **Ollama**, **your own server**
+(OpenAI-compatible), **OpenAI** or **Anthropic Claude**. The page shows only the settings that apply to the backend you
+pick: the model name, the server address, Claude's effort, the context size, and under **Behavior** the computer tools,
+web search, the system prompt, temperature and how many exchanges are remembered.
+
+- **Save** reloads the language model without restarting Parley, while it is idle (during an answer the change waits for
+  the end). The new one starts in the background and replaces the old one only when it works; if it cannot start, the
+  banner says why in one sentence and the previous model keeps answering. The conversation starts fresh after a switch.
+- **Cloud backends:** the page says in one line that your speech is still turned into text on this computer but that the
+  text, and anything the tools read or find, is sent to the provider.
+- **API key (OpenAI, Anthropic):** the page shows only whether a key is saved. Type or paste a key and press **Save key**
+  (**Replace key** when one exists): it goes into the Windows credential store and the box is emptied; it is never put in
+  `config.toml` and a saved key is never shown again. **Remove** deletes it (after you confirm). **Test key** sends one
+  request to the provider's own site to check the key; nothing is sent until you press it. If `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` is set and no key is saved, that is used and the page says so. A key for your own server, if it needs
+  one, stays in `config.toml` (`api_key` under `[llm]`).
+- **Server address:** an address starting with `http://` (not on this computer) shows a warning, because what you say and
+  any key travel unencrypted. For OpenAI a different host than OpenAI's own is flagged as well.
 
 ## Cloud backends and API keys
 
 By default everything runs locally. For smarter answers you can use Anthropic or OpenAI for the LLM
 step; speech recognition and the voice stay local, and only transcribed text and tool output are
-sent. Choose the backend in `config.toml` (`[llm] backend = "anthropic"` or `"openai"`), then save
-your key from a terminal:
+sent. Choose the backend and save the key on the **LLM** page of Settings (above), or from a terminal:
 
 ```
 parley --set-key anthropic

@@ -5,8 +5,8 @@ from . import models
 
 GROUPS = (("stt", "Speech recognition (Whisper)"), ("llm", "Language model"), ("tts", "Voice (Kokoro)"))
 LIVE_KINDS = frozenset({"llm", "stt", "tts"})  # kinds whose Download / Use / Delete work; others would be listed read-only
-RESTART_NOTES = {  # shown when Use is possible: nothing changes until Save, and then only after a restart
-    "llm": "Press Save to choose it. The language model changes after restarting Parley.",
+RESTART_NOTES = {  # shown when Use is possible: nothing changes until Save (the language model then reloads live; speech and voice need a restart)
+    "llm": "Press Save to choose it. Parley loads it in the background and switches when it is ready.",
     "stt": "Press Save to choose it. The speech model changes after restarting Parley.",
     "tts": "Press Save to choose it. The voice model changes after restarting Parley.",
 }
@@ -68,13 +68,14 @@ def warning_text(level: str) -> str:
 
 
 def status_text(m: models.Model, st: models.Status, in_use: bool, chosen: str = "") -> str:
-    """chosen: "" | "unsaved" (Use pressed, Save not yet) | "saved" (written to config.toml, needs a restart)."""
+    """chosen: "" | "unsaved" (Use pressed, Save not yet) | "saved" (written to config.toml: the language model is switching, the others need a restart)."""
     if st.state == "downloading":
         return f"Downloading {percent(st.bytes, m.total_bytes)}%"
     if in_use:
         base = "In use"
     elif chosen:
-        base = "Chosen (press Save)" if chosen == "unsaved" else "Chosen (restart Parley)"
+        saved = "Chosen (switching)" if m.kind == "llm" else "Chosen (restart Parley)"  # the language model reloads live
+        base = "Chosen (press Save)" if chosen == "unsaved" else saved
     elif st.state == "installed":
         base = "Installed"
     elif st.state == "partial":

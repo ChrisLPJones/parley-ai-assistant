@@ -1,16 +1,20 @@
 """The push-to-talk loop: hotkey -> record -> transcribe -> stream LLM -> speak sentence by sentence."""
 import contextlib
+import copy
+import dataclasses
 import logging
 import queue
+import re
 import threading
 import time
 from pathlib import Path
 
+import httpx
 import numpy as np
 
-from . import cuda_pack, gpu, settings_schema
+from . import credstore, cuda_pack, gpu, settings_schema
 from .audio import MIC_RATE, Player, Recorder, start_beep, stop_beep
-from .config import Config, app_dir
+from .config import Config, LlmConfig, ToolsConfig, app_dir
 from .llm import CLOUD_BACKENDS, create as create_chat
 from .stt import Transcriber
 from .tts import SentenceSplitter, Speaker
@@ -30,6 +34,26 @@ def activity_of(recording: bool, jobs_busy: bool, sentences_busy: bool, playing:
     if jobs_busy or sentences_busy:
         return "thinking"
     return "idle"
+
+
+# LlmConfig fields that make a different llama-server (the others only need a new Chat)
+SERVER_FIELDS = ("backend", "preset", "model_repo", "model_file", "model_path", "runtime", "gpu_layers", "num_ctx", "think")
+_KEYISH = re.compile(r"(?<![A-Za-z0-9])sk-\S+")
+
+
+def describe_failure(e: BaseException) -> str:
+    """One short plain sentence for a language model that could not start. Only Parley's own sentences (SystemExit) are
+    passed on, scrubbed of anything shaped like a key; other errors are named by type, never by their text."""
+    if isinstance(e, SystemExit):
+        text = e.code if isinstance(e.code, str) else "The language model is not set up correctly."
+    elif isinstance(e, httpx.HTTPError):
+        text = "Couldn't connect to the language model. Check the address and that it is running."
+    elif isinstance(e, RuntimeError) and "llama-server" in str(e):
+        text = "The built-in language model failed to start."
+    else:
+        text = f"The language model could not be loaded ({type(e).__name__})."
+    text = _KEYISH.sub("[key]", credstore.redact(" ".join(text.split())))
+    return text[:200]
 
 
 class Parley:
@@ -67,6 +91,7 @@ class Parley:
             if llm.backend == "builtin":
                 from . import llama_server
                 base_url, local_model = llama_server.start(llm, home)
+                self._server = (base_url, local_model)
             elif llm.backend in CLOUD_BACKENDS:
                 log.info("Using %s: what you say is transcribed locally, then the text is sent to %s",
                          CLOUD_BACKENDS[llm.backend], CLOUD_BACKENDS[llm.backend])
@@ -82,7 +107,11 @@ class Parley:
         self._apply_lock = threading.Lock()
         self._restart_paths: set[str] = set()  # saved settings that only a restart applies
         self.deferred: list[str] = []  # settings waiting for the current answer to finish
-        self._pending: dict = {"hotkey": None, "audio": {}}  # wanted hotkey / audio-device changes not applied yet
+        self._pending: dict = {"hotkey": None, "audio": {}, "llm": None}  # wanted hotkey / audio / language model changes not applied yet
+        self._server: tuple[str, str] | None = None  # (base URL, model name) of the built-in llama-server in use
+        self._llm_loading = False  # a reload_llm / rebuild_chat is building a new Chat in the background
+        self._key_dirty = False  # a saved key changed: the running Chat is rebuilt to use it
+        self.llm_state: tuple[str, str] = ("idle", "")  # idle | pending | loading | done | error, and a plain sentence for error
         self.on_applied = None  # called with the config after a deferred change was applied (the tray updates its key name)
         self._watching = False  # the thread that applies them after the answer is running
 
@@ -171,13 +200,14 @@ class Parley:
         The shared sub-dataclasses are changed IN PLACE (Speaker, Chat and the providers hold references to them), so
         `live` settings are seen at their next use. `hotkey` and `swap_audio` settings are applied while Parley is idle;
         during an answer they wait (`self.deferred`) and apply right after it. Restart-only settings (and the ones
-        whose machinery lands in a later change: the language-model backend and tools) are NOT written into the running
-        config, so the difference stays visible and Settings keeps offering "Restart now". `llm.api_key` is never handled
-        here: keys live in the credential store only.
+        a failed language-model reload) are NOT written into the running config, so the difference stays visible and
+        Settings keeps offering "Restart now". `rebuild_chat` / `reload_llm` settings (backend, model, address, tools, ...)
+        build a new Chat in the background while idle and swap it in only when it loaded (`llm_state` tells the window
+        how it went). `llm.api_key` is never handled here: keys live in the credential store only (see `key_changed`).
         """
         S = settings_schema
         applied, restart = [], []
-        hotkey_new, audio_new = None, {}
+        hotkey_new, audio_new, llm_paths = None, {}, []
         with self._apply_lock:
             for s in S.SETTINGS:
                 if s.path == "llm.api_key":
@@ -194,25 +224,43 @@ class Parley:
                     hotkey_new = new_v
                 elif s.apply == S.SWAP_AUDIO:
                     audio_new[s.path] = new_v
-                else:  # RESTART, and REBUILD_CHAT / RELOAD_LLM until their machinery exists
+                elif s.apply in (S.REBUILD_CHAT, S.RELOAD_LLM):
+                    llm_paths.append(s.path)
+                else:  # RESTART
                     self._restart_paths.add(s.path)
                     restart.append(s.path)
-            self._pending = {"hotkey": hotkey_new, "audio": audio_new}  # replaces an older wait: this is what's wanted now
+            llm_new = None
+            if llm_paths:  # the candidate is built from a copy: the running config only changes if it loads
+                llm_new = {"paths": llm_paths, "llm": copy.deepcopy(new.llm), "tools": copy.deepcopy(new.tools)}
+                self.llm_state = ("pending", "")
+            # replaces an older wait: this is what's wanted now
+            self._pending = {"hotkey": hotkey_new, "audio": audio_new, "llm": llm_new}
             a, r = self._apply_idle_changes()
         return applied + a, restart + r
 
+    def _llm_job(self) -> dict | None:
+        job = self._pending.get("llm")
+        if job is None and self._key_dirty:
+            job = {"paths": ["llm.api_key"], "llm": copy.deepcopy(self.cfg.llm), "tools": copy.deepcopy(self.cfg.tools)}
+        return job
+
+    def _ensure_watcher(self) -> None:
+        if not self._watching:
+            self._watching = True
+            threading.Thread(target=self._apply_when_idle, daemon=True, name="apply-config").start()
+
     def _apply_idle_changes(self) -> tuple[list[str], list[str]]:
-        """Apply the wanted hotkey / audio-device changes if Parley is idle, else wait for the end of the answer
-        (`self.deferred` names them). Call with `_apply_lock` held."""
-        hotkey_new, audio_new = self._pending["hotkey"], self._pending["audio"]
-        if not hotkey_new and not audio_new:
+        """Apply the wanted hotkey / audio-device / language-model changes if Parley is idle, else wait for the end of the
+        answer (`self.deferred` names them). The language model loads in the background; a second change waits for the
+        first load to finish. Call with `_apply_lock` held."""
+        hotkey_new, audio_new, llm_new = self._pending["hotkey"], self._pending["audio"], self._llm_job()
+        if not hotkey_new and not audio_new and not llm_new:
             self.deferred = []
             return [], []
+        llm_paths = list(llm_new["paths"]) if llm_new else []
         if self.is_busy():
-            self.deferred = (["hotkey.key"] if hotkey_new else []) + sorted(audio_new)
-            if not self._watching:
-                self._watching = True
-                threading.Thread(target=self._apply_when_idle, daemon=True, name="apply-config").start()
+            self.deferred = (["hotkey.key"] if hotkey_new else []) + sorted(audio_new) + llm_paths
+            self._ensure_watcher()
             return [], []
         applied, restart = [], []
         if hotkey_new:
@@ -231,8 +279,102 @@ class Parley:
             else:
                 restart += sorted(audio_new)
         self._restart_paths.update(restart)
-        self._pending, self.deferred = {"hotkey": None, "audio": {}}, []
+        self._pending = {"hotkey": None, "audio": {}, "llm": self._pending.get("llm")}
+        if llm_new is not None and self._llm_loading:
+            self.deferred = llm_paths  # the previous load is still running
+            self._ensure_watcher()
+            return applied, restart
+        if llm_new is not None:
+            self._start_llm_reload(llm_new)
+            self._pending["llm"], self._key_dirty = None, False
+        self.deferred = []
         return applied, restart
+
+    def _start_llm_reload(self, job: dict) -> None:
+        """Load the new language model on its own thread (call with `_apply_lock` held)."""
+        self._llm_loading = True
+        self.llm_state = ("loading", "")
+        by_path = settings_schema.BY_PATH
+        reload = any(p in by_path and by_path[p].apply == settings_schema.RELOAD_LLM for p in job["paths"])
+        work = self.reload_llm if reload else self.rebuild_chat
+        threading.Thread(target=work, args=(job["llm"], job["tools"], job["paths"]), daemon=True, name="reload-llm").start()
+
+    def key_changed(self, backend_name: str) -> None:
+        """A key for `backend_name` was saved or replaced in the credential store: if that backend is the one running, a
+        new Chat picks the key up (when idle, else after the answer). A removed key needs no call: the running Chat keeps
+        its copy until Parley restarts."""
+        if self.cfg.llm.backend != backend_name:
+            return
+        with self._apply_lock:
+            self._key_dirty = True
+            self.llm_state = ("pending", "")
+            self._apply_idle_changes()
+
+    def rebuild_chat(self, llm_cfg: LlmConfig | None = None, tools_cfg: ToolsConfig | None = None, paths=()) -> bool:
+        """A new Chat (history starts fresh) on the llama-server already running; see `reload_llm`."""
+        return self.reload_llm(llm_cfg or copy.deepcopy(self.cfg.llm), tools_cfg or copy.deepcopy(self.cfg.tools), paths,
+                               keep_server=True)
+
+    def reload_llm(self, llm_cfg: LlmConfig, tools_cfg: ToolsConfig, paths=(), keep_server: bool = False) -> bool:
+        """Build a language model from the candidate config (new llama-server if the built-in model's settings changed, then a
+        new Chat) and swap it in once Parley is idle. On any failure the old Chat and server keep running and `llm_state` holds
+        a plain sentence; the running config is untouched. Blocking: runs on its own thread. True when swapped."""
+        old = self.cfg.llm
+        started = None
+        try:
+            base_url, local_model = None, "local"
+            if llm_cfg.backend == "builtin":
+                same = self._server is not None and (keep_server or (
+                    old.backend == "builtin" and all(getattr(old, f) == getattr(llm_cfg, f) for f in SERVER_FIELDS)))
+                if same:
+                    base_url, local_model = self._server
+                else:  # the old server keeps running until the new one is up and swapped in (both hold memory meanwhile)
+                    from . import llama_server
+                    base_url, local_model = llama_server.start(llm_cfg, app_dir())
+                    started = base_url
+            elif llm_cfg.backend in CLOUD_BACKENDS:
+                log.info("Using %s: what you say is transcribed locally, then the text is sent to %s",
+                         CLOUD_BACKENDS[llm_cfg.backend], CLOUD_BACKENDS[llm_cfg.backend])
+            chat = create_chat(llm_cfg, tools_cfg, base_url, local_model)
+            chat.warm_up()
+        except (Exception, SystemExit) as e:
+            if started is not None:
+                from . import llama_server
+                llama_server.stop(started)
+            sentence = describe_failure(e)
+            log.warning("Could not load the new language model: %s", sentence)
+            log.debug("reload_llm failed", exc_info=True)
+            with self._apply_lock:
+                self._llm_loading = False
+                self._restart_paths.update(paths)
+                self.llm_state = ("error", sentence)
+            return False
+        server = (base_url, local_model) if llm_cfg.backend == "builtin" else None
+        while True:  # swap only between answers: the old Chat may be streaming, and its server is about to stop
+            with self._apply_lock:
+                if not self.is_busy():
+                    old_server = self._server
+                    for target, cand in ((self.cfg.llm, llm_cfg), (self.cfg.tools, tools_cfg)):
+                        for f in dataclasses.fields(cand):
+                            if f.name != "api_key":
+                                setattr(target, f.name, getattr(cand, f.name))
+                    chat.rebind(self.cfg.llm)
+                    self.chat, self._server = chat, server
+                    self._restart_paths.difference_update(paths)
+                    self._llm_loading = False
+                    self.llm_state = ("done", "")
+                    break
+            time.sleep(0.25)
+        if old_server is not None and (server is None or old_server[0] != server[0]):
+            from . import llama_server
+            llama_server.stop(old_server[0])
+        log.info("Language model switched: %s", chat.provider.describe())
+        if self.on_applied is not None:
+            try:
+                self.on_applied(self.cfg)
+            except Exception:
+                log.debug("on_applied failed", exc_info=True)
+        return True
 
     def _apply_when_idle(self) -> None:
         while True:

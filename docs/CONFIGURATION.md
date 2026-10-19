@@ -42,8 +42,10 @@ To remove everything, delete this folder (and the cloned repo, if you ran from s
 backend = "anthropic"   # or "openai"
 ```
 
-Then save your key with `parley --set-key anthropic` (or `openai`; the prompt hides what you type): it goes into the
-Windows credential store, never into a file. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment work too, a saved
+Then save your key on the **LLM** page of Settings (masked box, **Save key**; it shows only "Saved", never the key) or
+with `parley --set-key anthropic` (or `openai`; the prompt hides what you type): it goes into the
+Windows credential store, never into a file. Changing the backend, model, server address or tools in Settings reloads the
+language model without a restart (when idle). `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment work too, a saved
 key wins. `parley --key-status` shows what is saved and which source is used; `parley --delete-key anthropic` removes it.
 A plaintext `api_key` in an older `config.toml` is moved into the store at startup and removed from the file (rotate the
 key if that file was ever synced or shared).
