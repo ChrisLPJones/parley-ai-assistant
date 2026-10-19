@@ -12,6 +12,15 @@ from .config import SttConfig
 log = logging.getLogger(__name__)
 
 
+def resolve_name(cfg: SttConfig, gpu: bool) -> str:
+    """The Whisper model name for this config; `gpu` says whether it runs on the GPU (only matters for auto)."""
+    if cfg.model != "auto":
+        return cfg.model
+    if gpu:
+        return "large-v3-turbo"
+    return "small.en" if cfg.language == "en" else "small"  # ~1s per question on a laptop CPU
+
+
 class Transcriber:
     def __init__(self, cfg: SttConfig, model_dir: Path):
         self.cfg = cfg
@@ -39,11 +48,7 @@ class Transcriber:
         log.info("Speech recognition ready: %s on %s (%.1fs)", self.name, where, time.perf_counter() - start)
 
     def _model_name(self, gpu: bool) -> str:
-        if self.cfg.model != "auto":
-            return self.cfg.model
-        if gpu:
-            return "large-v3-turbo"
-        return "small.en" if self.cfg.language == "en" else "small"  # ~1s per question on a laptop CPU
+        return resolve_name(self.cfg, gpu)
 
     def _cpu_threads(self) -> int:
         """CTranslate2 defaults to 4 threads. Half the logical cores (physical cores on most CPUs,

@@ -61,7 +61,7 @@ toolkit, model caches) is used.
 |---|---|---|
 | Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `large-v3-turbo` on NVIDIA GPUs, `small.en` on CPU when language is "en", otherwise `small` (AMD and Intel GPUs can't run it, so the CPU does) |
 | LLM runtime | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` (pinned build) | CUDA on NVIDIA, Vulkan on a discrete AMD/Intel GPU, CPU otherwise, Metal on Mac |
-| LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise |
+| LLM model | small GGUF from Hugging Face | Qwen3.5 4B with a GPU, 2B otherwise; `preset = "medium"` (Qwen3.5 9B) for strong hardware |
 | Text-to-speech | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M | CUDA via ONNX Runtime on NVIDIA, otherwise CPU (already faster than real time) |
 
 The local models are deliberately small so Parley runs on ordinary laptops, which means answers

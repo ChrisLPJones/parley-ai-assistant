@@ -26,7 +26,7 @@ beam_size = 1
 backend = "builtin"
 
 # builtin
-preset = "auto"            # auto picks from your hardware: small (Qwen3.5 4B) with a GPU, tiny (Qwen3.5 2B) otherwise
+preset = "auto"            # auto picks from your hardware: small (Qwen3.5 4B) with a GPU, tiny (Qwen3.5 2B) otherwise; medium (Qwen3.5 9B) is never picked automatically
 # model_repo = "unsloth/Qwen3.5-9B-GGUF"   # any GGUF on Hugging Face instead of a preset
 # model_file = "Qwen3.5-9B-Q4_K_M.gguf"
 # model_path = "D:/models/my-model.gguf"    # or a GGUF already on disk

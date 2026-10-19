@@ -86,6 +86,15 @@ class Parley:
         self.on_applied = None  # called with the config after a deferred change was applied (the tray updates its key name)
         self._watching = False  # the thread that applies them after the answer is running
 
+    def models_in_use(self) -> set[str]:
+        """Catalog ids of the models this app is running (or, before they are loaded, would run): the Models page uses it
+        to refuse deleting them. The Whisper name comes from the loaded Transcriber, else from the config."""
+        from . import models, stt as stt_mod
+        name = getattr(getattr(self, "stt", None), "name", None)
+        if name is None:
+            name = stt_mod.resolve_name(self.cfg.stt, gpu.current_plan().stt == "cuda")
+        return models.ids_in_use(self.cfg, app_dir(), name)
+
     def is_current(self, turn: int) -> bool:
         return turn == self.turn
 

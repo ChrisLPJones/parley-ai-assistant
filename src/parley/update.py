@@ -268,6 +268,7 @@ class _Paced:
     def __init__(self, r: httpx.Response) -> None:
         self._r = r
         self.headers = r.headers
+        self.status_code = r.status_code
         self._start = time.monotonic()
 
     def iter_bytes(self, chunk_size: int | None = None):
