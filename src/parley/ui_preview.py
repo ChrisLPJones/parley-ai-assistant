@@ -1,13 +1,14 @@
 """Open the REAL settings window against a stub app and a throwaway home: no models, no microphone, no audio.
 
-    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice|models|llm]
-                                [--state restart-needed|error|downloading|download-error|key-saved|llm-error] [--auto-close SECONDS] [--smoke]
+    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice|models|llm|advanced]
+                                [--state restart-needed|error|downloading|download-error|key-saved|llm-error|update-available|offline] [--auto-close SECONDS] [--smoke]
 
 For looking at the window (and for scripts/shot_window.py). `PARLEY_HOME` is forced to a temp folder named
 `parley_test_ui_preview_*`, so Save writes a real config.toml there and nothing else is touched; the autostart control
 uses an in-memory fake. The Models page runs against `StubModels` (fake files, a simulated download, no network).
 The LLM page runs against an in-memory key store (the Windows credential store is never touched) and a stub app whose
-language model "loads" for 1.5 s. `--smoke` opens the window, checks it exists and exits 0.
+language model "loads" for 1.5 s.
+The Advanced page's update check and folder buttons are fakes (no network, no Explorer window). `--smoke` opens the window, checks it exists and exits 0.
 """
 import argparse
 import logging
@@ -98,6 +99,36 @@ class FakeKeyBackend:
 def fake_key_check(backend: str, key: str) -> str:
     time.sleep(0.8)  # looks like a network request; nothing is sent
     return "The provider accepted this key." if key else "There is no key to test."
+
+
+def stub_facts():
+    """A mid-range laptop with an NVIDIA card (the Advanced page's device lines); nothing is probed."""
+    from . import gpu, hardware_view
+
+    return hardware_view.Facts(gpu.NvidiaGpu("NVIDIA GeForce RTX 3060 Laptop GPU", 6144, 0),
+                               [gpu.Adapter("NVIDIA GeForce RTX 3060 Laptop GPU", "nvidia", 6144, 8192),
+                                gpu.Adapter("AMD Radeon(TM) Graphics", "amd", 512, 8192)],
+                               "AMD Ryzen 7 5800H with Radeon Graphics", 16)
+
+
+def fake_update_check(state: str | None = None):
+    """A stand-in for the update check: waits like a request, then says what `state` implies. Nothing is fetched."""
+    def check(notify) -> None:
+        time.sleep(0.8)
+        if state == "offline":
+            notify("Could not check for updates. Check your internet connection.")
+        elif state == "update-available":
+            notify("Version 0.2.0 is available. You chose not to install it now.")
+        else:
+            notify("Parley 0.1.0 is up to date.")
+    return check
+
+
+def fake_open_folder(name: str):
+    def opener() -> str:
+        print(f"ui_preview: would open the {name} folder")
+        return ""
+    return opener
 
 
 class StubModels:
@@ -266,7 +297,8 @@ class StubApp:
         return applied, restart
 
 
-def build_host(state: str | None = None, *, home: Path | None = None, models_state: str | None = None, page: str | None = None):
+def build_host(state: str | None = None, *, home: Path | None = None, models_state: str | None = None, page: str | None = None,
+               update_state: str | None = None):
     """(host, home, created). The stub app is `host.app`; `host.keys` is an in-memory credential store."""
     from . import config, credstore, settings_window
 
@@ -289,7 +321,9 @@ def build_host(state: str | None = None, *, home: Path | None = None, models_sta
                                 restart=lambda: print("Restart now clicked (preview: nothing restarts)"),
                                 get_hotkey=lambda: hotkey, list_devices=lambda kind: names[kind],
                                 autostart_api=FakeAutostart(), models_api=StubModels(models_state, home),
-                                detect_hardware=stub_hardware, keys_api=keys, key_check=fake_key_check)
+                                detect_hardware=stub_hardware, keys_api=keys, key_check=fake_key_check,
+                                check_updates=fake_update_check(update_state), hardware_facts=stub_facts,
+                                open_log_folder=fake_open_folder("log"), open_home_folder=fake_open_folder("Parley"))
     return host, home, created
 
 
@@ -297,10 +331,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m parley.ui_preview", description=__doc__.split("\n")[0])
     p.add_argument("--theme", choices=("light", "dark"), help="default: follow Windows")
     p.add_argument("--scale", type=int, choices=(100, 125, 150, 175, 200), help="default: the system's DPI scaling")
-    p.add_argument("--page", choices=("general", "voice", "models", "llm"), default="general")
-    p.add_argument("--state", choices=("restart-needed", "error", "downloading", "download-error", "key-saved", "llm-error"),
+    p.add_argument("--page", choices=("general", "voice", "models", "llm", "advanced"), default="general")
+    p.add_argument("--state", choices=("restart-needed", "error", "downloading", "download-error", "key-saved", "llm-error", "update-available", "offline"),
                    help="open with that banner showing (models page: a download at 43 %% or a failed one, default downloading; "
-                        "llm page: a key already saved, or a language model that fails to load after Save; no key saved by default)")
+                        "llm page: a key already saved, or a language model that fails to load after Save; no key saved by default; advanced page: what Check for updates answers)")
     p.add_argument("--auto-close", type=float, metavar="SECONDS", help="close the window after this long")
     p.add_argument("--smoke", action="store_true", help="open the window, check it exists, exit 0")
     args = p.parse_args(argv)
@@ -310,7 +344,8 @@ def main(argv: list[str] | None = None) -> int:
 
     banner_state = args.state if args.state in ("restart-needed", "error", "key-saved", "llm-error") else None
     models_state = args.state if args.state in ("downloading", "download-error") else ("downloading" if args.page == "models" else None)
-    host, home, created = build_host(banner_state, models_state=models_state, page=args.page)
+    update_state = args.state if args.state in ("update-available", "offline") else None
+    host, home, created = build_host(banner_state, models_state=models_state, page=args.page, update_state=update_state)
     print(f"ui_preview: throwaway home {home}")
     ui.theme_override, ui.scale_override = args.theme, args.scale
     t0 = time.monotonic()

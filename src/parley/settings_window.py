@@ -1,4 +1,4 @@
-"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice, Models, LLM.
+"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice, Models, LLM, Advanced.
 
 Runs on the UI thread (`ui.py`); other threads reach it only through `open_settings()` / `ui.post`. Every control comes
 from a `settings_schema.Setting` (label, help, range, validation) and is checked on each change: an invalid value shows an
@@ -9,7 +9,7 @@ to the credential store only (`Host.keys`), never to config.toml, the settings t
 soon as it is used and a stored key is never shown.
 
 `Host` is everything the window needs from the running app (config path, the `Parley` object once it exists, restart,
-hotkey capture, device lists, autostart); `ui_preview.py` supplies a stub, tray mode the real one.
+hotkey capture, device lists, autostart, update check and folder buttons); `ui_preview.py` supplies a stub, tray mode the real one.
 """
 import copy
 import logging
@@ -21,14 +21,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import (autostart, config, config_io, credstore, hotkey as hotkey_mod, models, models_view, settings_schema, ui,
+from . import (__version__, autostart, hardware_view, config, config_io, credstore, hotkey as hotkey_mod, models, models_view, settings_schema, ui,
                voices)
 
 log = logging.getLogger(__name__)
 
-PAGES = (("general", "General"), ("voice", "Voice"), ("models", "Models"), ("llm", "LLM"))
+PAGES = (("general", "General"), ("voice", "Voice"), ("models", "Models"), ("llm", "LLM"), ("advanced", "Advanced"))
 GENERAL_FIELDS = ("hotkey.key", "audio.input_device", "audio.output_device", "audio.sounds", "@autostart", "updates.check")
 VOICE_FIELDS = ("tts.voice", "tts.speed")
+# Advanced page: every setting that has no control on another page, by tab (tests check none is missing or shown twice)
+ADVANCED_TABS = (
+    ("Speech", ("audio.preroll_ms", "stt.language", "stt.beam_size", "stt.cpu_threads")),
+    ("Hardware", ("stt.device", "stt.compute_type", "tts.device", "llm.runtime", "llm.gpu_layers", "gpu.download_cuda")),
+    ("Language model", ("llm.reset_after_idle_s", "llm.model_repo", "llm.model_file", "llm.model_path")),
+)
+ADVANCED_PATHS = frozenset(p for _t, paths in ADVANCED_TABS for p in paths)
+NOT_ON_ADVANCED = ("tts.lang",)  # follows the voice; no control of its own
+RESTART_NOTE = " Takes effect after a restart."
 SYSTEM_DEFAULT = "System default"
 CAPTURE_TIMEOUT_MS = 10_000
 POLL_MS = 250
@@ -94,7 +103,10 @@ class Host:
                  get_hotkey: Callable[[], object] = lambda: None, list_devices: Callable[[str], list[str]] = list_audio_devices,
                  autostart_api=None, on_applied: Callable[[object], None] | None = None,
                  models_api=None, detect_hardware: Callable[[str], models.Hardware] | None = None,
-                 keys_api=None, key_check: Callable[[str, str], str] = credstore.check_key) -> None:
+                 keys_api=None, key_check: Callable[[str, str], str] = credstore.check_key,
+                 check_updates: Callable[[Callable[[str], None]], None] | None = None,
+                 open_log_folder: Callable[[], str] | None = None, open_home_folder: Callable[[], str] | None = None,
+                 version: str = __version__, hardware_facts: Callable[[], hardware_view.Facts] = hardware_view.probe) -> None:
         self.config_path = Path(config_path)
         self._get_app, self._get_error, self._restart = get_app, get_error, restart
         self._get_hotkey = get_hotkey
@@ -105,6 +117,10 @@ class Host:
         self._detect_hardware = detect_hardware
         self.keys = keys_api  # a credstore.CredStore (or a fake); None = the LLM page says keys can't be saved here
         self.key_check = key_check  # (backend, key) -> a plain sentence; one request to the provider's own host
+        self.check_updates = check_updates  # (notify) -> None; blocks (worker thread), reports its result through notify(sentence)
+        self.open_log_folder, self.open_home_folder = open_log_folder, open_home_folder  # () -> "" or a sentence about what failed
+        self.version = version
+        self.hardware_facts = hardware_facts  # () -> hardware_view.Facts (slow: worker thread only)
 
     def hardware(self, language: str = "en") -> models.Hardware:
         """Probe this computer (slow: worker thread only)."""
@@ -167,6 +183,28 @@ def summarize(applied: list[str], restart: list[str], deferred: list[str] = ()) 
     return "ok", "Applied."
 
 
+def range_text(setting: settings_schema.Setting) -> str:
+    """"Allowed: 1 to 10 (default 1)." from the schema's own limits and the config default; "" for a setting without a range."""
+    if setting.range is None:
+        return ""
+    lo, hi = setting.range
+    table, key = setting.path.split(".")
+    default = getattr(getattr(config.Config(), table), key)
+    zero = " (or 0)" if setting.zero_ok else ""
+    return f" Allowed: {lo} to {hi}{zero}, default {default}."
+
+
+def help_text(setting: settings_schema.Setting) -> str:
+    """The help of a setting. On the Advanced page a number also shows its allowed range and default; one that only takes
+    effect after a restart says so."""
+    text = setting.help
+    if setting.path in ADVANCED_PATHS and setting.type in ("int", "float"):
+        text += range_text(setting)
+    if setting.apply == settings_schema.RESTART and "restart" not in setting.help.lower():
+        text += RESTART_NOTE
+    return text
+
+
 def restart_banner(restart: list[str]) -> str:
     kind, text = summarize([], restart)
     return text.removeprefix("Saved. ")
@@ -224,6 +262,11 @@ class SettingsWindow:
         self._capture_job = None
         self._banner_kind = "ok"
         self._explicit_rows: dict[str, int] = {}  # parent widget -> next grid row (see _next_row)
+        self._hw_facts: hardware_view.Facts | None = None  # probed once, on a worker thread, when the Advanced page opens
+        self._hw_probing = False
+        self._hw_vars: dict[str, tk.StringVar] = {}
+        self._hw_labels: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}  # path -> (option sentence, device line)
+        self._entry_vars: dict[str, tk.StringVar] = {}  # text entries by setting path (the Models page's "Use" clears some)
         self._llm_watch = False  # a saved language model change is loading: follow app.llm_state and report the result
         self.top = tk.Toplevel(root)
         self.top.withdraw()
@@ -326,6 +369,7 @@ class SettingsWindow:
         self._build_voice(self.pages["voice"])
         self._build_models(self.pages["models"])
         self._build_llm(self.pages["llm"])
+        self._build_advanced(self.pages["advanced"])
         # banner + buttons (bottom)
         bar = ttk.Frame(top, padding=(pad, 0, pad, pad))
         bar.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -379,7 +423,7 @@ class SettingsWindow:
     def _help_and_error(self, row, setting, first_row: int, indent: int = 0, show_help: bool = True) -> ttk.Label:
         wrap = int(self.em * 24)
         if show_help:
-            ttk.Label(row, text=setting.help, style="Muted.TLabel", wraplength=wrap, justify="left").grid(
+            ttk.Label(row, text=help_text(setting), style="Muted.TLabel", wraplength=wrap, justify="left").grid(
                 row=first_row, column=0, sticky="w", padx=(indent, 0))
         err = ttk.Label(row, text="", style="Error.TLabel", wraplength=wrap, justify="left")
         err.grid(row=first_row + 1, column=0, sticky="w", padx=(indent, 0))
@@ -865,6 +909,9 @@ class SettingsWindow:
             return
         if m.kind == "llm":  # a built-in preset replaces any custom repo / file / path (they would win over the preset)
             self.model_choice.update({"llm.preset": m.key, "llm.model_repo": "", "llm.model_file": "", "llm.model_path": ""})
+            for p in ("llm.model_repo", "llm.model_file", "llm.model_path"):  # the Advanced page's entries follow
+                if p in self._entry_vars:
+                    self._entry_vars[p].set("")
         else:  # m.key is the catalog's Whisper name / Kokoro variant, i.e. already a valid stt.model / tts.model value
             self.model_choice[self.CHOICE_PATH[m.kind]] = m.key
         self._models_say("")
@@ -942,6 +989,152 @@ class SettingsWindow:
         self._entry_row(answers_tab, "llm.history_turns")
         self._backend_changed(initial=True)
 
+    # ---- page: Advanced ----
+    def _build_advanced(self, page) -> None:
+        self._title(page, "Advanced")
+        e = self.em
+        page.rowconfigure(1, weight=1)
+        notebook = ttk.Notebook(page)
+        notebook.grid(row=1, column=0, sticky="nsew")
+        self.advanced_tabs = notebook
+        for title, paths in ADVANCED_TABS:
+            tab = self._scrolling_tab(notebook, title)
+            for path in paths:
+                s = settings_schema.BY_PATH[path]
+                if s.type == "bool":
+                    self._bool_row(tab, s)
+                elif s.type == "choice":
+                    self._choice_row(tab, path)
+                else:
+                    self._entry_row(tab, path)
+        about = ttk.Frame(notebook, padding=(0, e // 2))
+        about.columnconfigure(0, weight=1)
+        notebook.add(about, text="About")
+        self._build_about(about)
+
+    def _scrolling_tab(self, notebook, title: str) -> ttk.Frame:
+        """A notebook tab whose content scrolls (mouse wheel or scroll bar) when it is taller than the window; returns the
+        frame to put rows in."""
+        outer = ttk.Frame(notebook)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+        bg = ttk.Style(self.top).lookup("TFrame", "background") or ("#1c1c1c" if self.dark else "#fafafa")
+        canvas = tk.Canvas(outer, highlightthickness=0, bd=0, bg=bg)
+        bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        bar.grid(row=0, column=1, sticky="ns")
+        inner = ttk.Frame(canvas, padding=(0, self.em // 2))
+        inner.columnconfigure(0, weight=1)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda ev: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda ev: canvas.itemconfigure(window, width=ev.width))
+
+        def wheel(ev) -> None:
+            if inner.winfo_reqheight() > canvas.winfo_height():
+                canvas.yview_scroll(-1 if ev.delta > 0 else 1, "units")
+
+        outer.bind("<Enter>", lambda ev: canvas.bind_all("<MouseWheel>", wheel))
+        outer.bind("<Leave>", lambda ev: canvas.unbind_all("<MouseWheel>"))
+        notebook.add(outer, text=title)
+        return inner
+
+    def _option_notes(self, row, path: str, var: tk.StringVar) -> None:
+        """Under a jargon dropdown: one plain sentence about the chosen option, and (device settings) what it runs on."""
+        wrap = int(self.em * 30)
+        note = tk.StringVar(value=hardware_view.OPTION_TEXT[path].get(var.get(), ""))
+        line = tk.StringVar(value="")
+        ttk.Label(row, textvariable=note, wraplength=wrap, justify="left").grid(row=10, column=0, sticky="w")
+        if path in hardware_view.STAGE_OF:
+            ttk.Label(row, textvariable=line, style="Muted.TLabel", wraplength=wrap, justify="left").grid(row=11, column=0, sticky="w")
+        self._hw_labels[path] = (note, line)
+        self._hw_vars[path] = var
+        if path in hardware_view.STAGE_OF:
+            line.set("Checking this computer...")
+            if self._hw_facts is None and not self._hw_probing:
+                self._hw_probing = True
+                threading.Thread(target=self._hw_probe, daemon=True, name="hardware-facts").start()
+
+    def _hw_probe(self) -> None:
+        try:
+            facts = self.host.hardware_facts()
+        except Exception:
+            log.exception("Could not read the hardware")
+            facts = None
+        ui.post(lambda: self._hw_loaded(facts))
+
+    def _hw_loaded(self, facts) -> None:
+        if not self.alive():
+            return
+        self._hw_facts = facts or hardware_view.Facts()
+        for path in self._hw_labels:
+            self._hw_refresh(path)
+
+    def _hw_refresh(self, path: str) -> None:
+        note, line = self._hw_labels[path]
+        choice = self._hw_vars[path].get()
+        note.set(hardware_view.OPTION_TEXT[path].get(choice, ""))
+        if path in hardware_view.STAGE_OF and self._hw_facts is not None:
+            line.set(hardware_view.device_line(hardware_view.STAGE_OF[path], choice, self._hw_facts))
+
+    def _build_about(self, tab) -> None:
+        e, wrap = self.em, int(self.em * 30)
+        self.version_label = ttk.Label(tab, text=f"Parley {self.host.version}")
+        self.version_label.grid(sticky="w", pady=(0, e // 2))
+        self.update_btn = ttk.Button(tab, text="Check for updates", command=self._check_updates)
+        self.update_btn.grid(sticky="w")
+        self.update_note = ttk.Label(tab, text="", wraplength=wrap, justify="left")
+        self.update_note.grid(sticky="w", pady=(e // 4, e // 2))
+        if self.host.check_updates is None:
+            self.update_btn.state(["disabled"])
+            self.update_note.configure(text="Update checks aren't available here.", style="Muted.TLabel")
+        btns = ttk.Frame(tab)
+        btns.grid(sticky="w")
+        self.log_btn = ttk.Button(btns, text="Open log folder", command=lambda: self._open_folder(self.host.open_log_folder))
+        self.log_btn.grid(row=0, column=0, padx=(0, e // 2))
+        self.home_btn = ttk.Button(btns, text="Open Parley folder", command=lambda: self._open_folder(self.host.open_home_folder))
+        self.home_btn.grid(row=0, column=1)
+        if self.host.open_log_folder is None:
+            self.log_btn.state(["disabled"])
+        if self.host.open_home_folder is None:
+            self.home_btn.state(["disabled"])
+        self.folder_note = ttk.Label(tab, text="", wraplength=wrap, justify="left", style="Muted.TLabel")
+        self.folder_note.grid(sticky="w", pady=(e // 4, 0))
+
+    def _check_updates(self) -> None:
+        if self.host.check_updates is None:
+            return
+        check = self.host.check_updates
+        self.update_btn.state(["disabled"])
+        self.update_note.configure(text="Checking...")
+
+        def work() -> None:
+            said: list[str] = []
+            try:
+                check(said.append)
+            except Exception:
+                log.exception("Update check failed")
+                said.append("Could not check for updates.")
+            text = said[-1] if said else "Checked."
+            ui.post(lambda: self._update_checked(text))
+
+        threading.Thread(target=work, daemon=True, name="settings-update-check").start()
+
+    def _update_checked(self, text: str) -> None:
+        if self.alive():
+            self.update_btn.state(["!disabled"])
+            self.update_note.configure(text=text)
+
+    def _open_folder(self, opener) -> None:
+        if opener is None:
+            return
+        try:
+            problem = opener()
+        except Exception:
+            log.exception("Opening a folder failed")
+            problem = "The folder could not be opened."
+        self.folder_note.configure(text=problem or "")
+
     def _backend(self) -> str:
         return self.fields["llm.backend"].to_value()
 
@@ -955,6 +1148,7 @@ class SettingsWindow:
         row = self._row(parent)
         ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
         var = tk.StringVar(value=str(cur))
+        self._entry_vars[path] = var
         entry = ttk.Entry(row, textvariable=var, width=44 if kind is str else 12)
         entry.grid(row=1, column=0, sticky="w")
         err = self._help_and_error(row, s, 2)
@@ -979,10 +1173,14 @@ class SettingsWindow:
         row = self._row(parent)
         ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
         var = tk.StringVar(value=self._base_value(path))
-        box = ttk.Combobox(row, textvariable=var, values=list(s.choices), state="readonly", width=12)
+        box = ttk.Combobox(row, textvariable=var, values=list(s.choices), state="readonly",
+                           width=max(12, max(len(c) for c in s.choices) + 2))
         box.grid(row=1, column=0, sticky="w")
         box.bind("<<ComboboxSelected>>", lambda ev, p=path: self._changed(p))
         err = self._help_and_error(row, s, 2)
+        if path in hardware_view.OPTION_TEXT:
+            self._option_notes(row, path, var)
+            box.bind("<<ComboboxSelected>>", lambda ev, p=path: self._hw_refresh(p), add="+")
         backends = LLM_BACKENDS.get(path)
         self.fields[path] = Field(s, var.get, err, [box], row=row, backends=backends)
         if backends:

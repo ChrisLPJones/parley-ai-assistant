@@ -41,7 +41,8 @@ Left-click the icon, or choose **Settings**, to open the Settings window. Right-
 | ![Tray menu, light](images/tray-menu-light.png) | ![Tray menu, dark](images/tray-menu-dark.png) |
 
 The menu shows the current status, then **Settings**, **Check for updates** (available in installed
-copies), **Open log folder** and **Quit**.
+copies), **Open log folder**, the version (greyed out) and **Quit**. **Check for updates** and **Open log folder** do the
+same as the buttons on the Advanced page of Settings; the result of an update check shows as a notification.
 
 ## Talking
 
@@ -126,6 +127,22 @@ web search, the system prompt, temperature and how many exchanges are remembered
   one, stays in `config.toml` (`api_key` under `[llm]`).
 - **Server address:** an address starting with `http://` (not on this computer) shows a warning, because what you say and
   any key travel unencrypted. For OpenAI a different host than OpenAI's own is flagged as well.
+
+
+**Advanced**
+
+Settings that most people never change, in four tabs. Anything that needs a restart says so under its name, and
+**Save** then offers **Restart now**.
+
+- **Speech:** pre-roll (audio kept from just before the key press), spoken language, beam size, CPU threads.
+- **Hardware:** where speech recognition and the voice run (auto, GPU or CPU), speech precision, the built-in model's
+  runtime and GPU layers, and the one-time download of the GPU libraries.
+- **Language model:** how long until a new conversation starts, and your own model (a Hugging Face repository and file,
+  or a `.gguf` file on this computer). Choosing a built-in model on the Models page replaces your own model.
+  Parley cannot verify a model you name yourself (built-in ones are checked against a pinned hash).
+- **About:** the Parley version, **Check for updates** (one sentence says whether you are up to date, there is a
+  newer version, or Parley could not reach the update server; it still asks before installing), **Open log folder**
+  and **Open Parley folder** (settings, models and logs).
 
 ## Cloud backends and API keys
 

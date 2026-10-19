@@ -292,6 +292,13 @@ class ClientTests(unittest.TestCase):
         u = self.updater()
         self.srv.close()
         self.assertIsNone(u.check())
+        self.assertTrue(u.last_check_failed)  # so the manual check can say "offline", not "up to date"
+
+    def test_up_to_date_is_not_a_failed_check(self):
+        make_release(self.srv, "0.1.0")
+        u = self.updater()
+        self.assertIsNone(u.check())  # the feed answered: the newest version is not newer than ours
+        self.assertFalse(u.last_check_failed)
 
     def test_feed_url_needs_path(self):
         for url in ["https://example.com", "https://example.com/"]:

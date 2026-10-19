@@ -25,7 +25,8 @@ hold key ──► mic ──► Whisper (GPU) ──► local LLM (streaming) �
 - Runs locally by default (speech recognition, LLM, voice); optional Anthropic or OpenAI backend for smarter answers.
 - Can act on your computer: read what is in a File Explorer folder, read a file, find and open
   files, folders, websites and Start menu apps, and search the web.
-- Windows tray app with a Settings window (talk key, microphone, speaker, voice and speed, start with Windows).
+- Windows tray app with a Settings window (talk key, microphone, speaker, voice and speed, models, language model and API keys,
+  an Advanced page for hardware and speech details, update check and log folder, start with Windows).
 - Uses an NVIDIA GPU when there is one; runs fine on CPU-only laptops.
 
 See the [usage guide](docs/USAGE.md) for details.

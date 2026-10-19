@@ -1,6 +1,7 @@
 # Configuration
 
-Most settings can be changed in the Settings window (see the [usage guide](USAGE.md)). Everything
+Most settings can be changed in the Settings window (see the [usage guide](USAGE.md)); the **Advanced** page has the ones
+not on another page (pre-roll, speech language, beam size, devices, GPU layers, your own model file). Everything
 is also stored in plain files you can edit.
 
 Parley keeps everything in a home folder, or `$PARLEY_HOME` if set:
@@ -31,6 +32,7 @@ To remove everything, delete this folder (and the cloned repo, if you ran from s
 | `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
 | `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search (limited to read-only access, a fixed list of openable file types and public web addresses) |
 | `[tts]` | `voice`, `speed`, `device`, `model` | Kokoro voice, speed, `auto`/`cuda`/`cpu`, and the Kokoro file: `default`, `fp16` or `int8` (smaller and quicker; their sound quality is not checked yet; needs a restart) |
+| (restart) | | These need a restart of Parley, and Settings says so: `stt.model`, `stt.device`, `stt.compute_type`, `stt.cpu_threads`, `tts.device`, `tts.model`, `gpu.download_cuda`. All other keys apply when you save |
 | `[gpu]` | `download_cuda` | Packaged copies only (default `true`): download the CUDA libraries (about 1.6 GB, once) on an NVIDIA GPU; the CPU is used until they are ready, then Parley restarts itself once, when idle, to use the GPU |
 | `[updates]` | `check` | Installed copies only (default `true`): look for a newer version after startup and ask before installing; a source checkout never updates itself. The update server is fixed at build time, not configurable |
 

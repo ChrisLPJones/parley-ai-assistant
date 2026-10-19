@@ -295,6 +295,7 @@ class Updater:
         self.platform = platform
         self.state_path = state_path
         self._http_local = _allow_http_localhost
+        self.last_check_failed = False  # the last check() could not reach or read the feed (so None did not mean up to date)
         self.feed_url = feed_url
         self._origin = self._check_url(feed_url)
         if not urlsplit(feed_url).path.strip("/"):
@@ -379,6 +380,7 @@ class Updater:
     # -- operations --
     def check(self) -> Manifest | None:
         """Newer manifest for this platform, or None (up to date, offline, or the answer was invalid)."""
+        self.last_check_failed = True
         try:
             m = parse_manifest(self._get_bytes(self.feed_url, MAX_MANIFEST_BYTES), self.platform)
         except (httpx.HTTPError, OSError) as e:
@@ -387,6 +389,7 @@ class Updater:
         except UpdateError as e:
             log.warning("Ignoring update manifest: %s", e)
             return None
+        self.last_check_failed = False
         if compare_versions(m.version, self.floor()) <= 0:
             log.debug("No newer version (feed has %s, floor %s)", m.version, self.floor())
             return None

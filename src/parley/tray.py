@@ -55,14 +55,17 @@ def default_items(
     on_open_logs: Callable[[], None] | None = None,
     on_quit: Callable[[], None] | None = None,
     can_check_updates: bool = True,
+    version: str = "",
 ) -> list[MenuItem]:
-    """The planned menu: disabled status line, Settings, Check for updates, Open log folder, Quit."""
+    """The menu: disabled status line, Settings, Check for updates, Open log folder, a disabled version line, Quit."""
     items = [MenuItem("status", status, enabled=False), MenuItem("sep1", "", separator=True)]
     items.append(MenuItem("settings", "Settings", on_settings))
     if can_check_updates:
         items.append(MenuItem("check_updates", "Check for updates", on_check_updates))
     items.append(MenuItem("open_logs", "Open log folder", on_open_logs))
     items.append(MenuItem("sep2", "", separator=True))
+    if version:
+        items.append(MenuItem("about", f"Parley {version}", enabled=False))
     items.append(MenuItem("quit", "Quit", on_quit))
     return items
 

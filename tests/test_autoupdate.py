@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from parley import __main__ as cli
@@ -229,7 +230,30 @@ class RestartAndManualCheckTests(FlowBase):
         said = []
         self.flow(FakeApp(), prompt).check_now(said.append)
         self.assertEqual(len(prompt.calls), 1)
-        self.assertEqual(said, [])
+        self.assertEqual(said, ["Version 0.2.0 is available. You chose not to install it now."])  # declined: one sentence
+
+    def test_manual_check_offline_says_so_instead_of_up_to_date(self):
+        said = []
+        offline = SimpleNamespace(check=lambda: None, last_check_failed=True)
+        self.flow(FakeApp(), Prompt(False), updater=offline).check_now(said.append)
+        self.assertEqual(said, ["Could not check for updates. Check your internet connection."])
+
+    def test_manual_check_crash_gives_one_sentence(self):
+        said = []
+
+        def boom():
+            raise RuntimeError("x")
+
+        with self.assertLogs("parley.autoupdate", "ERROR"):
+            self.flow(FakeApp(), Prompt(False), updater=SimpleNamespace(check=boom)).check_now(said.append)
+        self.assertEqual(said, ["Could not check for updates."])
+
+    def test_manual_check_install_says_it_is_restarting(self):
+        self.release("0.2.0", tree(OK + b"#2"))
+        said = []
+        with self.patch_install():
+            self.flow(FakeApp(), Prompt(True)).check_now(said.append)
+        self.assertEqual(said, ["Version 0.2.0 installed. Restarting Parley when it is idle."])
 
 
 class ConfirmAndNoticeTests(FlowBase):

@@ -192,12 +192,17 @@ class UpdateFlow:
         m = u.check()  # quiet None when offline, invalid or not newer
         if m is None or install.is_skipped(self.root, m.version):
             if notify:
-                notify(f"Parley {self.version} is up to date.")
+                if m is None and getattr(u, "last_check_failed", False):
+                    notify("Could not check for updates. Check your internet connection.")
+                else:
+                    notify(f"Parley {self.version} is up to date.")
             return
         if not self.wait_idle():  # recheck right before prompting
             return
         if not self.prompt("Parley update", prompt_text(m, self.version)):
             log.info("Update to %s declined; asking again next launch", m.version)
+            if notify:
+                notify(f"Version {m.version} is available. You chose not to install it now.")
             return
         if not self.wait_idle():  # the box can stay open a long time; recheck before applying
             return
@@ -209,6 +214,8 @@ class UpdateFlow:
             self.app.say(f"The update to {m.version} didn't install. Staying on {self.version}.")
             return
         log.info("Version %s installed; restarting", m.version)
+        if notify:
+            notify(f"Version {m.version} installed. Restarting Parley when it is idle.")
         self.app.say(f"Updated to version {m.version}. Restarting.")
         if self.wait_idle():  # never cut a conversation (or this sentence) short
             self.restart_requested.set()

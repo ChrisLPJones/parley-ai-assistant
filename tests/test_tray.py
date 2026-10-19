@@ -18,6 +18,16 @@ class MenuTests(unittest.TestCase):
         self.assertFalse(items[0].enabled)  # the status line is disabled
         self.assertTrue(all(i.enabled for i in items[1:]))
 
+    def test_version_line_is_a_disabled_item_before_quit(self):
+        items = default_items("Ready", version="0.1.0")
+        labels = [i.label for i in items if not i.separator]
+        self.assertEqual(labels, ["Ready", "Settings", "Check for updates", "Open log folder", "Parley 0.1.0", "Quit"])
+        about = next(i for i in items if i.id == "about")
+        self.assertFalse(about.enabled)
+        self.assertIsNone(about.callback)
+        model = build_menu_model(items)
+        self.assertFalse(dispatch_command(model, next(c for c, i in model if i.id == "about"), lambda _id: self.fail("ran")))
+
     def test_check_updates_can_be_hidden(self):
         labels = [i.label for i in default_items("x", can_check_updates=False)]
         self.assertNotIn("Check for updates", labels)
