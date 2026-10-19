@@ -1,4 +1,4 @@
-"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice.
+"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice, Models.
 
 Runs on the UI thread (`ui.py`); other threads reach it only through `open_settings()` / `ui.post`. Every control comes
 from a `settings_schema.Setting` (label, help, range, validation) and is checked on each change: an invalid value shows an
@@ -16,13 +16,14 @@ import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
-from . import autostart, config, config_io, hotkey as hotkey_mod, settings_schema, ui, voices
+from . import (autostart, config, config_io, hotkey as hotkey_mod, models, models_view, settings_schema, ui,
+               voices)
 
 log = logging.getLogger(__name__)
 
-PAGES = (("general", "General"), ("voice", "Voice"))
+PAGES = (("general", "General"), ("voice", "Voice"), ("models", "Models"))
 GENERAL_FIELDS = ("hotkey.key", "audio.input_device", "audio.output_device", "audio.sounds", "@autostart", "updates.check")
 VOICE_FIELDS = ("tts.voice", "tts.speed")
 SYSTEM_DEFAULT = "System default"
@@ -68,13 +69,22 @@ class Host:
     def __init__(self, config_path: Path, get_app: Callable[[], object] = lambda: None,
                  get_error: Callable[[], str | None] = lambda: None, restart: Callable[[], None] | None = None,
                  get_hotkey: Callable[[], object] = lambda: None, list_devices: Callable[[str], list[str]] = list_audio_devices,
-                 autostart_api=None, on_applied: Callable[[object], None] | None = None) -> None:
+                 autostart_api=None, on_applied: Callable[[object], None] | None = None,
+                 models_api=None, detect_hardware: Callable[[str], models.Hardware] | None = None) -> None:
         self.config_path = Path(config_path)
         self._get_app, self._get_error, self._restart = get_app, get_error, restart
         self._get_hotkey = get_hotkey
         self.list_devices = list_devices
         self.autostart = autostart_api or RealAutostart()
         self.on_applied = on_applied
+        self.models = models_api  # a models.ModelManager (or a stub); None = the Models page says it is unavailable
+        self._detect_hardware = detect_hardware
+
+    def hardware(self, language: str = "en") -> models.Hardware:
+        """Probe this computer (slow: worker thread only)."""
+        if self._detect_hardware is not None:
+            return self._detect_hardware(language)
+        return models.detect_hardware(config.app_dir(), language)
 
     @property
     def app(self):
@@ -214,7 +224,7 @@ class SettingsWindow:
     def _place(self) -> None:
         e = self.em
         sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
-        w, h = min(int(e * 40), int(sw * 0.9)), min(int(e * 33), int(sh * 0.9))
+        w, h = min(int(e * 58), int(sw * 0.9)), min(int(e * 42), int(sh * 0.9))
         self.top.minsize(min(int(e * 34), w), min(int(e * 26), h))
         x, y = (sw - w) // 2, max(0, (sh - h) // 3)
         self.top.geometry(f"{w}x{h}+{x}+{y}")
@@ -272,6 +282,7 @@ class SettingsWindow:
             frame.grid_remove()
         self._build_general(self.pages["general"])
         self._build_voice(self.pages["voice"])
+        self._build_models(self.pages["models"])
         # banner + buttons (bottom)
         bar = ttk.Frame(top, padding=(pad, 0, pad, pad))
         bar.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -295,6 +306,8 @@ class SettingsWindow:
         if self.nav.selection() != (key,):
             self.nav.selection_set(key)
         self.page = key
+        if key == "models" and getattr(self, "model_tree", None) is not None:
+            self._models_refresh()
 
     def _nav_changed(self, _event=None) -> None:
         sel = self.nav.selection()
@@ -550,11 +563,262 @@ class SettingsWindow:
             except Exception:
                 busy = False
             state, note = not busy, "Playing or busy..." if busy else ""
+        self._models_poll()
         if hasattr(self, "sample_btn"):
             self.sample_btn.state(["!disabled"] if state else ["disabled"])
             if note or self.sample_note.cget("text") in ("Playing or busy...", "Available once Parley has started.", "Starting..."):
                 self.sample_note.configure(text=note)
         self.top.after(POLL_MS, self._poll)
+
+    # ---- page: Models ----
+    def _build_models(self, page) -> None:
+        self.model_tree = None
+        self.model_choice: dict[str, object] = {}  # path -> value set by "Use"; written by Save, like any other setting
+        self.hw: models.Hardware | None = None
+        self.model_status: dict[str, models.Status] = {}
+        self.model_used: set[str] = set()
+        self.model_own = None
+        self._models_busy = self._models_again = False
+        self._dl_sig = None
+        self._title(page, "Models")
+        api = self.host.models
+        if api is None:
+            ttk.Label(page, text="The list of models isn't available right now.", style="Muted.TLabel").grid(sticky="w")
+            return
+        em = self.em
+        wrap = int(em * 42)
+        page.rowconfigure(2, weight=1)
+        self.hw_text = tk.StringVar(value="Checking this computer...")
+        ttk.Label(page, textvariable=self.hw_text, style="Muted.TLabel", wraplength=wrap, justify="left").grid(
+            row=1, column=0, sticky="w", pady=(0, em // 2))
+        box = ttk.Frame(page)
+        box.grid(row=2, column=0, sticky="nsew")
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(box, columns=("size", "status", "fit"), selectmode="browse", height=12)
+        tree.heading("#0", text="Name", anchor="w")
+        tree.heading("size", text="Size", anchor="w")
+        tree.heading("status", text="Status", anchor="w")
+        tree.heading("fit", text="Fit for this computer", anchor="w")
+        tree.column("#0", width=int(em * 15), stretch=True)
+        tree.column("size", width=int(em * 5), stretch=False)
+        tree.column("status", width=int(em * 10), stretch=False)
+        tree.column("fit", width=int(em * 12), stretch=True)
+        sb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
+        from tkinter import font as tkfont
+        self._bold = tkfont.nametofont("TkDefaultFont").copy()
+        self._bold.configure(weight="bold")
+        tree.tag_configure("inuse", font=self._bold)
+        tree.tag_configure("rec", foreground=self.colors["ok"])
+        tree.bind("<<TreeviewSelect>>", lambda e: self._models_buttons())
+        self.model_tree = tree
+        self.model_detail = ttk.Label(page, text="Select a model to see what it does.", wraplength=wrap, justify="left")
+        self.model_detail.grid(row=3, column=0, sticky="w", pady=(em // 2, 0))
+        prog = ttk.Frame(page)
+        prog.grid(row=4, column=0, sticky="ew", pady=(em // 2, 0))
+        prog.columnconfigure(0, weight=1)
+        self.model_bar = ttk.Progressbar(prog, maximum=100, mode="determinate")
+        self.model_bar.grid(row=0, column=0, sticky="ew")
+        self.model_bar_text = ttk.Label(prog, text="", width=24, anchor="e")
+        self.model_bar_text.grid(row=0, column=1, padx=(em // 2, 0))
+        self.model_progress = prog
+        prog.grid_remove()
+        btns = ttk.Frame(page)
+        btns.grid(row=5, column=0, sticky="w", pady=(em // 2, 0))
+        self.model_btns = {}
+        for i, (key, text, cmd) in enumerate((("download", "Download", self._model_download), ("cancel", "Cancel", self._model_cancel),
+                                              ("use", "Use", self._model_use), ("delete", "Delete", self._model_delete))):
+            b = ttk.Button(btns, text=text, command=cmd, state="disabled")
+            b.grid(row=0, column=i, padx=(0, em // 2))
+            self.model_btns[key] = b
+        self.model_note = ttk.Label(page, text="", style="Muted.TLabel", wraplength=wrap, justify="left")
+        self.model_note.grid(row=6, column=0, sticky="w", pady=(em // 2, 0))
+        self.model_msg = ttk.Label(page, text="", wraplength=wrap, justify="left")
+        self.model_msg.grid(row=7, column=0, sticky="w")
+        self._dl_sig = self._dl_signature()
+        self._models_refresh()
+
+    def _dl_signature(self):
+        st = self.host.models.state
+        return (st.model_id, st.phase, st.done)
+
+    def _models_say(self, text: str, kind: str = "") -> None:
+        self.model_msg.configure(text=text, foreground=self.colors.get(kind, ""))
+
+    def _models_refresh(self) -> None:
+        """Scan the models folder (and probe the hardware once) on a worker thread, then redraw."""
+        if self.model_tree is None:
+            return
+        if self._models_busy:
+            self._models_again = True
+            return
+        self._models_busy = True
+        api, host, cfg, hw = self.host.models, self.host, self.base, self.hw
+
+        def work() -> None:
+            try:
+                status, used = api.scan(), api.in_use_ids()
+                own = models.own_llm_file(cfg, api.home)
+                hw2 = hw or host.hardware(cfg.stt.language or "en")
+            except Exception:
+                log.exception("Could not list the models")
+                status, used, own, hw2 = None, set(), None, hw
+            ui.post(lambda: self._models_loaded(status, used, own, hw2))
+
+        threading.Thread(target=work, daemon=True, name="models-scan").start()
+
+    def _models_loaded(self, status, used, own, hw) -> None:
+        if not self.alive():
+            return
+        self._models_busy = False
+        if status is None:
+            self._models_say("Parley couldn't read the models folder.", "error")
+        else:
+            self.model_status, self.model_used, self.model_own = status, used, own
+            self.hw = hw
+            self.hw_text.set(models_view.hardware_line(hw) if hw else "")
+            self._models_fill()
+        if self._models_again:
+            self._models_again = False
+            self._models_refresh()
+
+    def _chosen_key(self) -> tuple[str | None, str]:
+        """(preset the user chose, "unsaved" | "saved"); None when nothing is chosen (auto, or a custom model)."""
+        if "llm.preset" in self.model_choice:
+            key = self.model_choice["llm.preset"]
+            return key, ("saved" if key == self.base.llm.preset else "unsaved")
+        llm = self.base.llm
+        if llm.preset != "auto" and not (llm.model_repo or llm.model_path):
+            return llm.preset, "saved"
+        return None, ""
+
+    def _models_fill(self) -> None:
+        tree = getattr(self, "model_tree", None)
+        if tree is None or not self.model_status:
+            return
+        keep = tree.selection()
+        tree.delete(*tree.get_children())
+        api = self.host.models
+        rec = models.recommended_ids(self.hw) if self.hw else set()
+        chosen, how = self._chosen_key()
+        for kind, title in models_view.GROUPS:
+            gid = f"group:{kind}"
+            tree.insert("", "end", iid=gid, text=title, open=True)
+            if kind == "llm" and self.model_own is not None:
+                o = self.model_own
+                tree.insert(gid, "end", iid=models_view.OWN_ID, text=o.label, tags=("inuse",),
+                            values=(models_view.format_size(o.bytes), "In use", "Not checked"))
+            for m in models_view.ordered(kind, api.catalog):
+                st = self.model_status.get(m.id, models.Status("not_installed"))
+                in_use = m.id in self.model_used
+                pick = how if (kind == "llm" and chosen == m.key and not in_use) else ""
+                level, words = models.suitability(m, self.hw) if self.hw else ("", "Checking...")
+                size = st.bytes if st.state == "installed" else m.total_bytes
+                tags = (["inuse"] if in_use else []) + (["rec"] if m.id in rec else [])
+                tree.insert(gid, "end", iid=m.id, tags=tags, text=m.label + (" - recommended" if m.id in rec else ""),
+                            values=(models_view.format_size(size), models_view.status_text(m, st, in_use, pick),
+                                    models_view.fit_text(level, words)))
+        if keep and tree.exists(keep[0]):
+            tree.selection_set(keep[0])
+        self._models_buttons()
+
+    def _selected_model(self) -> models.Model | None:
+        sel = self.model_tree.selection()
+        return self.host.models.catalog.get(sel[0]) if sel else None
+
+    def _models_buttons(self) -> None:
+        tree = getattr(self, "model_tree", None)
+        if tree is None:
+            return
+        m = self._selected_model()
+        sel = tree.selection()
+        chosen, _how = self._chosen_key()
+        if m is None:
+            text = ("Your own model file. Choose a built-in model to replace it." if sel and sel[0] == models_view.OWN_ID
+                    else "Select a model to see what it does.")
+            a = models_view.Actions(False, False, False, False)
+            self.model_detail.configure(text=text)
+        else:
+            st = self.model_status.get(m.id, models.Status("not_installed"))
+            a = models_view.actions(m, st, in_use=m.id in self.model_used, selected=m.kind == "llm" and chosen == m.key,
+                                    other_chosen=chosen is not None and chosen != m.key, dl=self.host.models.state)
+            detail = m.note
+            if self.hw:
+                level, words = models.suitability(m, self.hw)
+                detail += f" {models_view.fit_text(level, words)}. {models_view.warning_text(level)}"
+            self.model_detail.configure(text=detail.rstrip())
+        for key, b in self.model_btns.items():
+            b.state(["!disabled"] if getattr(a, key) else ["disabled"])
+        note = a.note
+        if m is not None and m.kind == "llm" and a.use:
+            note = models_view.LLM_RESTART_NOTE
+        self.model_note.configure(text=note)
+
+    def _models_poll(self) -> None:
+        """Called by _poll every POLL_MS: follow the download state (the worker thread never touches Tk)."""
+        if getattr(self, "model_tree", None) is None:
+            return
+        st = self.host.models.state
+        sig = (st.model_id, st.phase, st.done)
+        running = st.phase in ("downloading", "verifying")
+        if running:
+            self.model_progress.grid()
+            self.model_bar.configure(value=models_view.percent(st.done, st.total))
+            self.model_bar_text.configure(text=models_view.progress_text(st))
+            if self.model_tree.exists(st.model_id):
+                self.model_tree.set(st.model_id, "status", f"Downloading {models_view.percent(st.done, st.total)}%")
+        else:
+            self.model_progress.grid_remove()
+        if sig == self._dl_sig:
+            return
+        before = self._dl_sig
+        self._dl_sig = sig
+        if before is None or before[:2] != sig[:2]:  # started, finished, failed or cancelled: redraw and say how it went
+            if st.phase in ("error", "cancelled", "done"):
+                self._models_say(st.message, "error" if st.phase == "error" else "ok")
+            self._models_refresh()
+
+    def _model_download(self) -> None:
+        m = self._selected_model()
+        if m is None:
+            return
+        try:
+            self.host.models.download(m.id)  # a catalog id only: the manager rebuilds every URL and path itself
+        except models.ModelError as e:
+            return self._models_say(str(e), "error")
+        self._models_say("")
+        self._models_poll()
+        self._models_refresh()
+
+    def _model_cancel(self) -> None:
+        self.host.models.cancel()
+
+    def _model_use(self) -> None:
+        m = self._selected_model()
+        if m is None or m.kind != "llm":
+            return
+        # a built-in preset replaces any custom repo / file / path (they would win over the preset otherwise)
+        self.model_choice = {"llm.preset": m.key, "llm.model_repo": "", "llm.model_file": "", "llm.model_path": ""}
+        self._models_say("")
+        self._models_fill()
+
+    def _model_delete(self) -> None:
+        m = self._selected_model()
+        if m is None:
+            return
+        st = self.model_status.get(m.id, models.Status("not_installed"))
+        if not messagebox.askyesno("Delete model", f"Delete {m.label}?\nThis frees {models_view.format_size(st.bytes)}. "
+                                   "You can download it again later.", parent=self.top):
+            return
+        try:
+            freed = self.host.models.delete(m.id)
+        except models.ModelError as e:
+            return self._models_say(str(e), "error")
+        self._models_say(f"{m.label} deleted. {models_view.format_size(freed)} freed.", "ok")
+        self._models_refresh()
 
     # ---- values and validation ----
     def _base_value(self, path: str):
@@ -603,6 +867,9 @@ class SettingsWindow:
             if not valid:
                 ok = False
             elif value != self._base_value(path):
+                changes[path] = value
+        for path, value in self.model_choice.items():  # "Use" on the Models page (values from the catalog)
+            if value != self._base_value(path):
                 changes[path] = value
         voice = changes.get("tts.voice")
         if voice and (lang := settings_schema.voice_lang(voice)) and lang != self._base_value("tts.lang"):
@@ -693,6 +960,7 @@ class SettingsWindow:
             table, key = path.split(".")
             setattr(getattr(new, table), key, value)
         self.base = new
+        self._models_fill()  # "Chosen (press Save)" becomes "Chosen (restart Parley)"
         self._after_save(new, bool(changes), autostart_problem)
 
     def _after_save(self, new, wrote_config: bool, autostart_problem: str | None) -> None:

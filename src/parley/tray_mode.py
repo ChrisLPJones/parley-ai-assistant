@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import config, credstore, download, instance, logsetup, tray, ui
+from . import config, credstore, download, instance, logsetup, models, tray, ui
 
 log = logging.getLogger(__name__)
 
@@ -151,13 +151,14 @@ class TrayApp:
         self.tray = tray_factory(on_activate=threaded(self.open_settings, "activate"),
                                  on_open_settings=threaded(self.open_settings, "open-settings"))
         self.settings_host = None  # None = Settings unavailable (tkinter missing); the tray keeps working
+        self.models = models.ModelManager(self.home, in_use=self._models_in_use)  # shared: a download outlives the window
         try:
             from . import settings_window  # tkinter: imported only when the tray app exists, never for the console loop
 
             self.settings_host = settings_window.Host(
                 args.config or config.default_config_path(),
                 get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
-                get_hotkey=lambda: self.hotkey, on_applied=self._on_applied)
+                get_hotkey=lambda: self.hotkey, on_applied=self._on_applied, models_api=self.models)
         except ImportError as e:
             log.warning("Settings are unavailable: %s", e)
         self.app = self.flow = self.hotkey = None
@@ -173,6 +174,16 @@ class TrayApp:
         self._welcome_active = threading.Event()  # the spoken welcome is pending or playing: counts as busy
         self._pack_restart = False  # the automatic restart after the GPU libraries arrived is already scheduled
         self._last_settings = float("-inf")  # monotonic time of the last accepted Settings request
+
+    def _models_in_use(self) -> set[str]:
+        """Catalog ids the app runs (or, while it starts, is configured to run); the Models page never deletes these."""
+        app = self.app
+        if app is not None:
+            return app.models_in_use()
+        try:
+            return models.ids_in_use(config.load(self.args.config), self.home)
+        except SystemExit:  # a mistake in config.toml: keep every model
+            return set(models.CATALOG)
 
     # ---- life cycle ----
     def run(self) -> int:
@@ -214,6 +225,7 @@ class TrayApp:
     def shutdown(self) -> None:
         self.quit_event.set()
         download.set_observer(None)
+        self.models.cancel()  # a model download from the Models page; the .part file is kept for next time
         ui.stop()  # closes the settings window; Tk is destroyed on its own thread
         for stop in (getattr(self.hotkey, "stop", None), getattr(self.flow, "stop", None)):
             if stop:

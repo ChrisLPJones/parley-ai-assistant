@@ -1,11 +1,12 @@
 """Open the REAL settings window against a stub app and a throwaway home: no models, no microphone, no audio.
 
-    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice]
-                                [--state restart-needed|error] [--auto-close SECONDS] [--smoke]
+    python -m parley.ui_preview [--theme light|dark] [--scale 100|125|150|200] [--page general|voice|models]
+                                [--state restart-needed|error|downloading|download-error] [--auto-close SECONDS] [--smoke]
 
 For looking at the window (and for scripts/shot_window.py). `PARLEY_HOME` is forced to a temp folder named
 `parley_test_ui_preview_*`, so Save writes a real config.toml there and nothing else is touched; the autostart control
-uses an in-memory fake. `--smoke` opens the window, checks it exists and exits 0.
+uses an in-memory fake. The Models page runs against `StubModels` (fake files, a simulated download, no network).
+`--smoke` opens the window, checks it exists and exits 0.
 """
 import argparse
 import logging
@@ -71,6 +72,102 @@ class FakeHotkey:
             threading.Timer(1.0, press).start()
 
 
+class StubModels:
+    """Stands in for `models.ModelManager`: the real catalog, fake files on a fake computer, and a download that is only a
+    clock (about 40 MB/s). Nothing is read from or written to disk and nothing is fetched."""
+
+    RATE = 40 * 1024**2
+
+    def __init__(self, mode: str | None = None, home: Path | None = None) -> None:
+        from . import models
+
+        self.home = home or Path(tempfile.gettempdir())
+        self.catalog = models.CATALOG
+        self._m = models
+        self._lock = threading.Lock()
+        self._installed = {"llm-tiny", "llm-small", "stt-small.en", "stt-base.en", "tts-kokoro"}
+        self._partial = {"stt-medium": 400 * 1024**2}
+        self._in_use = {"llm-tiny", "stt-small.en", "tts-kokoro"}
+        self._dl = models.DownloadState()
+        self._t0 = 0.0
+        if mode == "downloading":  # 43 % of the 9B model
+            total = self.catalog["llm-medium"].total_bytes
+            self._begin("llm-medium", time.monotonic() - 0.43 * total / self.RATE)
+        elif mode == "download-error":
+            self._dl = models.DownloadState("llm-medium", 0, 1, 0, 0, "error",
+                                            "The Qwen3.5 9B (medium) download failed its safety check, so Parley discarded it.")
+
+    def _begin(self, mid: str, t0: float) -> None:
+        m = self.catalog[mid]
+        self._t0 = t0
+        self._dl = self._m.DownloadState(mid, 0, len(m.files) or 1, 0, m.total_bytes, "downloading")
+
+    @property
+    def state(self):
+        with self._lock:
+            d = self._dl
+            if d.phase == "downloading":
+                done = min(d.total, int((time.monotonic() - self._t0) * self.RATE))
+                if done >= d.total:
+                    self._installed.add(d.model_id)
+                    self._partial.pop(d.model_id, None)
+                    self._dl = self._m.DownloadState(d.model_id, 0, d.file_count, d.total, d.total, "done",
+                                                     f"{self.catalog[d.model_id].label} is ready.")
+                else:
+                    self._dl = self._m.DownloadState(d.model_id, 0, d.file_count, done, d.total, "downloading")
+            return self._dl
+
+    def status(self, m):
+        st = self.state
+        if st.phase == "downloading" and st.model_id == m.id:
+            return self._m.Status("downloading", st.done)
+        if m.id in self._installed:
+            return self._m.Status("installed", m.total_bytes)
+        if m.id in self._partial:
+            return self._m.Status("partial", self._partial[m.id])
+        return self._m.Status("not_installed", 0)
+
+    def scan(self):
+        return {mid: self.status(m) for mid, m in self.catalog.items()}
+
+    def in_use_ids(self):
+        return set(self._in_use)
+
+    def download(self, model_id: str) -> None:
+        m = self.catalog.get(model_id)
+        if m is None or not m.pinned:
+            raise self._m.ModelError("Parley does not know that model.")
+        if self.state.phase == "downloading":
+            raise self._m.ModelError("Another model is already downloading. Wait for it or cancel it first.")
+        with self._lock:
+            self._begin(model_id, time.monotonic() - self._partial.get(model_id, 0) / self.RATE)
+
+    def cancel(self) -> None:
+        st = self.state
+        if st.phase == "downloading":
+            with self._lock:
+                self._partial[st.model_id] = st.done
+                self._dl = self._m.DownloadState(st.model_id, 0, st.file_count, st.done, st.total, "cancelled",
+                                                 "Download cancelled. What was downloaded is kept so you can continue.")
+
+    def delete(self, model_id: str) -> int:
+        m = self.catalog.get(model_id)
+        if m is None or model_id in self._in_use:
+            raise self._m.ModelError("That model is in use. Switch to another model first, then delete it.")
+        freed = m.total_bytes if model_id in self._installed else self._partial.get(model_id, 0)
+        self._installed.discard(model_id)
+        self._partial.pop(model_id, None)
+        return freed
+
+
+def stub_hardware(language: str = "en"):
+    """A mid-range laptop: 6 GB graphics card, 12 GB memory, so the 9B model shows as 'too big'."""
+    from . import models
+
+    return models.Hardware(vram_mb=6144, gpu_name="NVIDIA GeForce RTX 3060 Laptop GPU", ram_mb=12288, free_disk_mb=120 * 1024,
+                           llm_runtime="cuda", speech_runtime="cuda", preset="small", language=language)
+
+
 class StubApp:
     """The parts of `Parley` the window uses. `apply_config` classifies like the real one (by the schema), nothing runs."""
 
@@ -112,7 +209,7 @@ class StubApp:
         return applied, restart
 
 
-def build_host(state: str | None = None, *, home: Path | None = None):
+def build_host(state: str | None = None, *, home: Path | None = None, models_state: str | None = None):
     """(host, home, created). The stub app is `host.app`."""
     from . import config, settings_window
 
@@ -131,7 +228,8 @@ def build_host(state: str | None = None, *, home: Path | None = None):
     host = settings_window.Host(cfg_path, get_app=lambda: app, get_error=lambda: error,
                                 restart=lambda: print("Restart now clicked (preview: nothing restarts)"),
                                 get_hotkey=lambda: hotkey, list_devices=lambda kind: names[kind],
-                                autostart_api=FakeAutostart())
+                                autostart_api=FakeAutostart(), models_api=StubModels(models_state, home),
+                                detect_hardware=stub_hardware)
     return host, home, created
 
 
@@ -139,8 +237,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m parley.ui_preview", description=__doc__.split("\n")[0])
     p.add_argument("--theme", choices=("light", "dark"), help="default: follow Windows")
     p.add_argument("--scale", type=int, choices=(100, 125, 150, 175, 200), help="default: the system's DPI scaling")
-    p.add_argument("--page", choices=("general", "voice"), default="general")
-    p.add_argument("--state", choices=("restart-needed", "error"), help="open with that banner showing")
+    p.add_argument("--page", choices=("general", "voice", "models"), default="general")
+    p.add_argument("--state", choices=("restart-needed", "error", "downloading", "download-error"),
+                   help="open with that banner showing (models page: a download at 43 %% or a failed one; default downloading)")
     p.add_argument("--auto-close", type=float, metavar="SECONDS", help="close the window after this long")
     p.add_argument("--smoke", action="store_true", help="open the window, check it exists, exit 0")
     args = p.parse_args(argv)
@@ -148,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import settings_window, ui
 
-    host, home, created = build_host(args.state)
+    banner_state = args.state if args.state in ("restart-needed", "error") else None
+    models_state = args.state if args.state in ("downloading", "download-error") else ("downloading" if args.page == "models" else None)
+    host, home, created = build_host(banner_state, models_state=models_state)
     print(f"ui_preview: throwaway home {home}")
     ui.theme_override, ui.scale_override = args.theme, args.scale
     t0 = time.monotonic()

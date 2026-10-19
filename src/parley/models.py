@@ -452,6 +452,10 @@ class ModelManager:
             return Status("legacy", 0)  # an older download made by faster-whisper itself (not verified)
         return Status("not_installed", 0)
 
+    def in_use_ids(self) -> set[str]:
+        """Catalog ids in use right now (what `delete` refuses); can be slow, call it from a worker thread."""
+        return set(self._in_use())
+
     def scan(self) -> dict[str, Status]:
         return {mid: self.status(m) for mid, m in self.catalog.items()}
 

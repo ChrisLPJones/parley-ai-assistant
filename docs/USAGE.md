@@ -92,6 +92,20 @@ Use **Save** to apply and **Close** to leave.
 Pick a voice from the list (grouped by accent and gender), set the speaking speed (1 is normal) and
 press **Play sample** to hear it.
 
+**Models**
+
+Lists every model Parley knows about (speech recognition, language model and voice) with its size, whether it is
+installed or in use, and how well it should run on your computer (a word and a symbol: fits your GPU, slower, or too
+big). The one Parley recommends for your hardware is marked "recommended". Nothing is hidden: a model that looks too big
+can still be tried, at your own risk.
+
+- **Download:** fetches the selected model and checks it. A bar shows the progress; **Cancel** stops it and keeps what
+  was downloaded so the next download continues. One download runs at a time, and it carries on if you close Settings.
+- **Use:** chooses a language model. Press **Save**, then restart Parley: the language model changes after a restart.
+- **Delete:** removes a downloaded model after you confirm. The model in use can't be deleted.
+
+Choosing and downloading speech and voice models from this page is coming in the next update; for now they are listed only.
+
 ## Cloud backends and API keys
 
 By default everything runs locally. For smarter answers you can use Anthropic or OpenAI for the LLM

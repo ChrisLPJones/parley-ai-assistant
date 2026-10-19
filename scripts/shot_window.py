@@ -1,4 +1,4 @@
-"""Dev tool: screenshots of the real Settings window (stub app, throwaway home) for light/dark x 100/150 %, General and Voice.
+"""Dev tool: screenshots of the real Settings window (stub app, throwaway home) for light/dark x 100/150 %, General, Voice and Models.
 
     uv run python scripts/shot_window.py [--out DIR] [--themes light dark] [--scales 100 150] [--no-sample]
 
@@ -108,9 +108,10 @@ def main(argv: list[str] | None = None) -> int:
     def current():
         return settings_window._current
 
-    def shoot(name: str, page: str, theme: str, scale: int, state: str | None = None, act=None) -> None:
+    def shoot(name: str, page: str, theme: str, scale: int, state: str | None = None, act=None,
+              models_state: str | None = None) -> None:
         ui.theme_override, ui.scale_override = theme, scale
-        h, _, _ = ui_preview.build_host(state, home=home)
+        h, _, _ = ui_preview.build_host(state, home=home, models_state=models_state)
         settings_window.open_settings(h, page)
         end = time.monotonic() + 10
         while not ui.call(lambda: current() is not None and current().alive()):
@@ -135,8 +136,10 @@ def main(argv: list[str] | None = None) -> int:
             for scale in args.scales:
                 shoot("general", "general", theme, scale)
                 shoot("voice", "voice", theme, scale)
+                shoot("models", "models", theme, scale, models_state="downloading")
                 if not args.no_sample:
                     shoot("voice-playing", "voice", theme, scale, act=lambda w: w.sample_btn.invoke())
+                    shoot("models-error", "models", theme, scale, models_state="download-error")
                     shoot("general-restart-needed", "general", theme, scale, state="restart-needed")
                     shoot("general-error", "general", theme, scale, state="error")
     finally:
