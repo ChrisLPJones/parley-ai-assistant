@@ -691,6 +691,14 @@ class DeleteTests(Scratch):
 
 
 class InUseTests(Scratch):
+    def test_in_use_ids_returns_the_callback_result_as_a_copy(self):
+        ids = {"llm-tiny", "tts-kokoro"}
+        mgr = ModelManager(self.home, in_use=lambda: ids)
+        got = mgr.in_use_ids()
+        self.assertEqual(got, {"llm-tiny", "tts-kokoro"})
+        got.add("x")
+        self.assertEqual(ids, {"llm-tiny", "tts-kokoro"})
+
     def test_ids_in_use_from_config(self):
         cfg = Config()
         cfg.llm.preset = "small"

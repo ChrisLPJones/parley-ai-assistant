@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from parley import config_io, settings_schema as S, settings_window as sw, ui, ui_preview, voices
+from parley import config_io, models, models_view as mv, settings_schema as S, settings_window as sw, ui, ui_preview, voices
 
 SECRET = "TESTKEY-not-a-real-secret-0123456789"
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +85,89 @@ class PureTests(unittest.TestCase):
 
     def test_no_page_offers_the_api_key(self):
         self.assertNotIn("llm.api_key", (*sw.GENERAL_FIELDS, *sw.VOICE_FIELDS))
+
+
+class ModelsViewTests(unittest.TestCase):
+    cat = models.CATALOG
+
+    def st(self, state="installed", n=0):
+        return models.Status(state, n)
+
+    def acts(self, mid, state="installed", **kw):
+        kw = {"in_use": False, "selected": False, "other_chosen": False, "dl": models.DownloadState(), **kw}
+        return mv.actions(self.cat[mid], self.st(state), **kw)
+
+    def test_sizes_and_hardware_line(self):
+        self.assertEqual((mv.format_size(0), mv.format_size(74 * 1024**2), mv.format_size(int(1.5 * 1024**3))), ("-", "74 MB", "1.5 GB"))
+        line = mv.hardware_line(ui_preview.stub_hardware())
+        self.assertIn("6 GB video memory", line)
+        self.assertIn("12 GB memory", line)
+        self.assertIn("No supported graphics card", mv.hardware_line(models.Hardware(ram_mb=8192, free_disk_mb=50 * 1024)))
+
+    def test_fit_is_word_and_symbol_never_colour_only(self):
+        for level in ("good", "slow", "no"):
+            text = mv.fit_text(level, "Some words")
+            self.assertTrue(text.endswith("Some words") and len(text) > len("Some words"), text)
+        self.assertEqual(mv.warning_text("good"), "")
+        self.assertIn("slower", mv.warning_text("slow"))
+        self.assertIn("at your own risk", mv.warning_text("no"))  # warns, never blocks
+
+    def test_status_text(self):
+        m = self.cat["llm-small"]
+        self.assertEqual(mv.status_text(m, self.st(), True), "In use")
+        self.assertEqual(mv.status_text(m, self.st(), False, "unsaved"), "Chosen (press Save)")
+        self.assertEqual(mv.status_text(m, self.st(), False, "saved"), "Chosen (restart Parley)")
+        self.assertEqual(mv.status_text(m, self.st("not_installed"), False), "Not installed")
+        self.assertEqual(mv.status_text(m, self.st("downloading", m.total_bytes // 2), False), "Downloading 50%")
+        self.assertTrue(mv.status_text(m, self.st("partial", 5 * 1024**2), False).startswith("Partly"))
+
+    def test_language_model_button_rules(self):
+        a = self.acts("llm-small", "not_installed")
+        self.assertEqual((a.download, a.cancel, a.use, a.delete), (True, False, False, False))
+        a = self.acts("llm-small")
+        self.assertEqual((a.download, a.use, a.delete), (False, True, True))
+        a = self.acts("llm-small", in_use=True)  # in use: no Use, no Delete, and it says why
+        self.assertEqual((a.use, a.delete), (False, False))
+        self.assertIn("in use", a.note)
+        self.assertTrue(self.acts("llm-small", in_use=True, other_chosen=True).use)  # to switch back
+        self.assertFalse(self.acts("llm-small", selected=True).delete)
+        running = models.DownloadState("llm-medium", 0, 1, 10, 100, "downloading")
+        a = self.acts("llm-medium", "downloading", dl=running)
+        self.assertEqual((a.download, a.cancel, a.use, a.delete), (False, True, False, False))
+        a = self.acts("llm-tiny", "not_installed", dl=running)  # one download at a time
+        self.assertEqual((a.download, a.cancel), (False, False))
+        self.assertIn("Another download", a.note)
+        self.assertTrue(self.acts("llm-medium", "partial").download)  # continues where it stopped
+        self.assertTrue(self.acts("llm-medium", "partial").delete)
+
+    def test_speech_and_voice_are_read_only_with_a_note(self):
+        for mid in ("stt-small.en", "tts-kokoro"):
+            for state in ("installed", "not_installed"):
+                a = self.acts(mid, state)
+                self.assertEqual((a.download, a.cancel, a.use, a.delete), (False,) * 4, mid)
+                self.assertEqual(a.note, mv.COMING_SOON)
+
+    def test_models_are_listed_largest_first_within_each_group(self):
+        for kind, _title in mv.GROUPS:
+            got = mv.ordered(kind, self.cat)
+            sizes = [m.total_bytes for m in got]
+            self.assertEqual(sizes, sorted(sizes, reverse=True), kind)
+            self.assertEqual({m.id for m in got}, {m.id for m in self.cat.values() if m.kind == kind})  # none dropped
+        self.assertEqual([m.id for m in mv.ordered("llm", self.cat)], ["llm-medium", "llm-small", "llm-tiny"])
+
+    def test_equal_sizes_keep_catalog_order(self):
+        import dataclasses
+
+        base = self.cat["stt-small"]
+        cat = {i: dataclasses.replace(base, id=i, files=(), approx_bytes=100 * 1024**2) for i in ("stt-b", "stt-a", "stt-c")}
+        cat["stt-big"] = dataclasses.replace(base, id="stt-big", files=(), approx_bytes=200 * 1024**2)
+        self.assertEqual([m.id for m in mv.ordered("stt", cat)], ["stt-big", "stt-b", "stt-a", "stt-c"])
+
+    def test_unpinned_model_cannot_be_downloaded(self):
+        m = models.build_catalog({})["llm-small"]
+        a = mv.actions(m, self.st("not_installed"), in_use=False, selected=False, other_chosen=False, dl=models.DownloadState())
+        self.assertFalse(a.download)
+        self.assertEqual(mv.status_text(m, self.st("not_installed"), False), "Not available yet")
 
 
 def tk_ok() -> bool:
@@ -370,6 +453,214 @@ class WindowTests(WindowCase):
         self.assertTrue(self.on_ui(lambda: self.win.autostart_cb.instate(["disabled"])))
 
 
+class ModelsPageTests(WindowCase):
+    """The Models page against ui_preview.StubModels (fake files, simulated download) on a fake computer."""
+
+    def open_models(self, host=None):
+        self.open(host)
+        self.on_ui(lambda: self.win.show_page("models"))
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            if self.on_ui(lambda: self.win.model_tree is not None and self.win.model_tree.exists("llm-small")
+                          and self.win.hw is not None):
+                return
+            time.sleep(0.05)
+        self.fail("the models page never filled")
+
+    def host_with(self, models_state=None):
+        host, _h, _ = ui_preview.build_host(home=self.home, models_state=models_state)
+        return host
+
+    def row(self, mid):
+        return self.on_ui(lambda: (self.win.model_tree.item(mid, "text"), *self.win.model_tree.item(mid, "values")))
+
+    def pick(self, mid):
+        self.on_ui(lambda: self.win.model_tree.selection_set(mid))
+        time.sleep(0.1)
+
+    def btns(self):
+        return self.on_ui(lambda: {k: not b.instate(["disabled"]) for k, b in self.win.model_btns.items()})
+
+    def note(self):
+        return self.on_ui(lambda: self.win.model_note.cget("text"))
+
+    def msg(self):
+        return self.on_ui(lambda: self.win.model_msg.cget("text"))
+
+    def wait_row(self, mid, status, timeout=4):
+        end = time.monotonic() + timeout
+        while self.row(mid)[2] != status and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertEqual(self.row(mid)[2], status)
+
+    def test_every_catalog_model_is_listed_in_its_group_and_nothing_is_filtered(self):
+        self.open_models(self.host_with())
+        for kind, _title in mv.GROUPS:
+            kids = self.on_ui(lambda k=kind: list(self.win.model_tree.get_children(f"group:{k}")))
+            self.assertEqual([i for i in kids if i != mv.OWN_ID], [m.id for m in mv.ordered(kind, models.CATALOG)])  # largest first
+        self.assertEqual(self.row("llm-tiny")[1:3], ("1.2 GB", "In use"))
+        self.assertIn("Too big", self.row("llm-medium")[3])  # listed with the warning, not hidden
+        self.assertTrue(self.row("llm-small")[0].endswith("recommended"))
+        self.assertIn("12 GB memory", self.on_ui(lambda: self.win.hw_text.get()))
+
+    def test_in_use_model_cannot_be_deleted_and_the_row_explains(self):
+        self.open_models(self.host_with("downloading"))
+        self.pick("llm-tiny")
+        self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": False, "delete": False})
+        self.assertIn("in use", self.note())
+        self.pick("llm-medium")  # the one downloading in this preview
+        self.assertEqual(self.btns(), {"download": False, "cancel": True, "use": False, "delete": False})
+        detail = self.on_ui(lambda: self.win.model_detail.cget("text"))
+        self.assertIn("Too big for this computer", detail)
+        self.assertIn("at your own risk", detail)
+
+    def test_speech_and_voice_rows_are_read_only(self):
+        self.open_models(self.host_with())
+        for mid in ("stt-small.en", "stt-large-v3-turbo", "tts-kokoro", "tts-kokoro-int8"):
+            self.pick(mid)
+            self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": False, "delete": False}, mid)
+            self.assertIn("next update", self.note())
+
+    def test_use_sets_pending_values_and_save_writes_only_those_keys(self):
+        self.open_models(self.host_with())
+        self.pick("llm-small")
+        self.assertTrue(self.btns()["use"])
+        self.assertIn("restarting Parley", self.note())
+        self.on_ui(self.win._model_use)
+        self.assertEqual(self.row("llm-small")[2], "Chosen (press Save)")
+        self.assertNotIn("llm", self.cfg_path.read_text("utf-8"))  # nothing is written before Save
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertTrue(ok)
+        self.assertEqual(changes, {"llm.preset": "small"})  # the empty repo / file / path already match config.toml
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. 1 setting needs a restart")
+        out = self.cfg_path.read_text("utf-8")
+        self.assertIn('preset = "small"', out)
+        self.assertIn("# my favourite", out)
+        self.assertEqual(self.row("llm-small")[2], "Chosen (restart Parley)")
+        self.assertEqual(self.row("llm-tiny")[2], "In use")  # still what is running
+
+    def test_use_warns_that_it_replaces_a_custom_model_only_when_there_is_one(self):
+        self.open_models(self.host_with())
+        self.pick("llm-small")
+        self.assertNotIn(mv.OWN_REPLACE_NOTE, self.note())  # no custom model: no warning
+        self.on_ui(self.win.close)
+        self.cfg_path.write_text('[llm]\nmodel_repo = "someone/their-model-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
+        host = self.host_with()
+        with mock.patch.object(models, "own_llm_file", return_value=models.OwnFile("Your own file", self.home / "x.gguf", 5)):
+            self.open_models(host)
+            self.pick("llm-small")
+            self.assertIn(mv.OWN_REPLACE_NOTE, self.note())
+            self.assertIn("restarting Parley", self.note())
+
+    def test_use_replaces_a_custom_model(self):
+        self.cfg_path.write_text('[llm]\nmodel_repo = "someone/their-model-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
+        self.open_models(self.host_with())
+        self.pick("llm-small")
+        self.on_ui(self.win._model_use)
+        changes, _ok = self.on_ui(self.win.collect)
+        self.assertEqual(changes, {"llm.preset": "small", "llm.model_repo": "", "llm.model_file": ""})
+
+    def test_download_progress_cancel_and_one_at_a_time(self):
+        host = self.host_with("downloading")
+        self.open_models(host)
+        self.pick("llm-medium")
+        time.sleep(0.6)
+        self.assertTrue(self.on_ui(lambda: self.win.model_progress.winfo_manager() != ""))
+        self.assertRegex(self.on_ui(lambda: self.win.model_bar_text.cget("text")), r"of 5\.3 GB \(\d+%\)")
+        self.assertGreaterEqual(self.on_ui(lambda: float(self.win.model_bar.cget("value"))), 43)
+        host.models._installed.discard("llm-small")  # a model that could be downloaded, if nothing else was running
+        self.on_ui(self.win._models_refresh)
+        time.sleep(0.4)
+        self.pick("llm-small")
+        self.assertFalse(self.btns()["download"])
+        self.assertIn("Another download", self.note())
+        self.pick("llm-medium")
+        self.on_ui(self.win.model_btns["cancel"].invoke)
+        end = time.monotonic() + 3
+        while "cancelled" not in self.msg() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertIn("cancelled", self.msg())
+        end = time.monotonic() + 3
+        while not self.row("llm-medium")[2].startswith("Partly") and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertTrue(self.row("llm-medium")[2].startswith("Partly"))
+        self.assertEqual(self.on_ui(lambda: self.win.model_progress.winfo_manager()), "")
+
+    def test_a_failed_download_is_reported_in_plain_words(self):
+        host = self.host_with()
+        self.open_models(host)
+        self.pick("llm-medium")
+        self.on_ui(self.win._model_download)
+        st = host.models.state
+        self.assertEqual(st.phase, "downloading")
+        with host.models._lock:  # the worker reports a failed safety check
+            host.models._dl = models.DownloadState("llm-medium", 0, 1, 5, 100, "error", "The Qwen3.5 9B (medium) download failed its safety check, so Parley discarded it.")
+        end = time.monotonic() + 3
+        while "safety check" not in self.msg() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertIn("safety check", self.msg())
+
+    def test_download_click_passes_the_catalog_id_only_and_a_second_is_refused(self):
+        host = self.host_with()
+        calls = []
+        real = host.models.download
+        host.models.download = lambda mid: calls.append(mid) or real(mid)
+        self.open_models(host)
+        self.pick("llm-medium")
+        self.assertTrue(self.btns()["download"])
+        self.on_ui(self.win._model_download)
+        self.assertEqual(calls, ["llm-medium"])
+        time.sleep(0.6)
+        self.assertTrue(self.row("llm-medium")[2].startswith("Downloading"))
+        self.assertFalse(self.btns()["download"])
+        self.on_ui(self.win._model_download)  # forced past the disabled button: the manager says no
+        self.assertIn("already downloading", self.msg())
+
+    def test_delete_asks_first_and_frees_the_space(self):
+        host = self.host_with()
+        self.open_models(host)
+        self.pick("llm-small")
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=False) as ask:
+            self.on_ui(self.win._model_delete)
+        self.assertIn("Qwen3.5 4B", ask.call_args.args[1])
+        self.assertIn("llm-small", host.models._installed)  # declined: nothing deleted
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=True):
+            self.on_ui(self.win._model_delete)
+        self.assertNotIn("llm-small", host.models._installed)
+        self.assertIn("freed", self.msg())
+        self.wait_row("llm-small", "Not installed")
+
+    def test_without_a_manager_the_page_says_so_and_nothing_breaks(self):
+        host = sw.Host(self.cfg_path, autostart_api=ui_preview.FakeAutostart(), list_devices=lambda k: [])
+        self.open(host)
+        self.on_ui(lambda: self.win.show_page("models"))
+        time.sleep(0.5)
+        self.assertIsNone(self.on_ui(lambda: self.win.model_tree))
+
+    def test_closing_mid_download_leaves_it_running_and_touches_no_tk(self):
+        host = self.host_with("downloading")
+        self.open_models(host)
+        self.on_ui(self.win.close)
+        time.sleep(0.8)  # polls and a scan may still be queued: none may raise
+        self.assertEqual(host.models.state.phase, "downloading")
+
+    def test_a_failing_scan_gives_a_plain_message(self):
+        host = self.host_with()
+
+        def boom(lang):
+            raise OSError("no probe")
+
+        host._detect_hardware = boom
+        with self.assertLogs("parley.settings_window", "ERROR"):
+            self.open(host)
+            self.on_ui(lambda: self.win.show_page("models"))
+            end = time.monotonic() + 5
+            while "couldn't read" not in self.msg() and time.monotonic() < end:
+                time.sleep(0.05)
+        self.assertIn("couldn't read", self.msg())
+
+
 class SaveFailureTests(WindowCase):
     def test_read_only_config_gives_a_friendly_message(self):
         self.open()
@@ -598,6 +889,15 @@ class PreviewSmokeTests(unittest.TestCase):
         self.assertIn("window open after", r.stdout)
         self.assertIn("parley_test_", r.stdout)  # a throwaway home
         self.assertLess(took, 30)
+
+    def test_ui_preview_models_page_opens(self):
+        with tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
+            env = {**os.environ, "PARLEY_HOME": str(Path(tmp) / "parley_test_ui_smoke")}
+            r = subprocess.run([sys.executable, "-m", "parley.ui_preview", "--smoke", "--page", "models", "--state", "download-error"],
+                               capture_output=True, text=True, timeout=120, env=env, cwd=ROOT)
+        if r.returncode == 1 and "could not start" in r.stderr:
+            self.skipTest("no display for Tk")
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
 
     def test_ui_preview_never_uses_the_real_home(self):
         real = os.path.join(os.environ.get("LOCALAPPDATA", "x"), "parley")
