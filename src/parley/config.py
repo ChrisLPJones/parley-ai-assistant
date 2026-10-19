@@ -48,7 +48,8 @@ class AudioConfig:
 @dataclass
 class SttConfig:
     # auto = large-v3-turbo on an NVIDIA GPU, small.en on CPU (fast enough for laptops);
-    # or any faster-whisper model name: tiny / base / small / medium / large-v3-turbo / distil-large-v3
+    # or a model from Parley's own list (Settings > Models): tiny.en / base.en / small.en / small / medium / large-v3-turbo.
+    # Only those are accepted: each is downloaded and checked against a pinned hash, other names are refused
     model: str = "auto"
     device: str = "auto"  # auto | cuda | cpu
     compute_type: str = "default"  # default | float16 | int8_float16 | int8
@@ -99,6 +100,8 @@ class TtsConfig:
     lang: str = "en-us"
     # auto = CUDA on NVIDIA, otherwise CPU (Kokoro's DirectML build fails on this model, so AMD/Intel GPUs aren't used)
     device: str = "auto"  # auto | cuda | cpu
+    # Which Kokoro file: default (full precision) | fp16 | int8 (smaller and quicker, the sound is not checked yet)
+    model: str = "default"
 
 
 @dataclass

@@ -85,7 +85,8 @@ class StubModels:
         self.catalog = models.CATALOG
         self._m = models
         self._lock = threading.Lock()
-        self._installed = {"llm-tiny", "llm-small", "stt-small.en", "stt-base.en", "tts-kokoro"}
+        self._installed = {"llm-tiny", "llm-small", "stt-small.en", "stt-base.en", "tts-kokoro",
+                          "tts-kokoro-fp16"}
         self._partial = {"stt-medium": 400 * 1024**2}
         self._in_use = {"llm-tiny", "stt-small.en", "tts-kokoro"}
         self._dl = models.DownloadState()

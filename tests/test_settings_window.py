@@ -140,12 +140,25 @@ class ModelsViewTests(unittest.TestCase):
         self.assertTrue(self.acts("llm-medium", "partial").download)  # continues where it stopped
         self.assertTrue(self.acts("llm-medium", "partial").delete)
 
-    def test_speech_and_voice_are_read_only_with_a_note(self):
-        for mid in ("stt-small.en", "tts-kokoro"):
-            for state in ("installed", "not_installed"):
-                a = self.acts(mid, state)
-                self.assertEqual((a.download, a.cancel, a.use, a.delete), (False,) * 4, mid)
-                self.assertEqual(a.note, mv.COMING_SOON)
+    def test_speech_and_voice_models_have_the_same_button_rules_as_language_models(self):
+        for mid in ("stt-small.en", "tts-kokoro-fp16"):
+            a = self.acts(mid, "not_installed")
+            self.assertEqual((a.download, a.cancel, a.use, a.delete), (True, False, False, False), mid)
+            a = self.acts(mid)
+            self.assertEqual((a.download, a.use, a.delete), (False, True, True), mid)
+            a = self.acts(mid, in_use=True)
+            self.assertEqual((a.use, a.delete), (False, False), mid)
+            self.assertIn("in use", a.note)
+            self.assertTrue(self.acts(mid, in_use=True, other_chosen=True).use, mid)
+            self.assertFalse(self.acts(mid, selected=True).delete, mid)
+        self.assertEqual(mv.LIVE_KINDS, {"llm", "stt", "tts"})
+
+    def test_every_kind_has_a_restart_note_and_unchecked_voices_say_so(self):
+        for kind, _title in mv.GROUPS:
+            self.assertIn("restarting Parley", mv.RESTART_NOTES[kind])
+        self.assertIn("not checked", self.cat["tts-kokoro-fp16"].note)
+        self.assertIn("not checked", self.cat["tts-kokoro-int8"].note)
+        self.assertNotIn("not checked", self.cat["tts-kokoro"].note)
 
     def test_models_are_listed_largest_first_within_each_group(self):
         for kind, _title in mv.GROUPS:
@@ -514,12 +527,66 @@ class ModelsPageTests(WindowCase):
         self.assertIn("Too big for this computer", detail)
         self.assertIn("at your own risk", detail)
 
-    def test_speech_and_voice_rows_are_read_only(self):
+    def test_speech_and_voice_rows_can_be_downloaded_chosen_and_deleted(self):
+        host = self.host_with()
+        self.open_models(host)
+        self.pick("stt-tiny.en")  # not installed in the stub
+        self.assertEqual(self.btns(), {"download": True, "cancel": False, "use": False, "delete": False})
+        self.pick("stt-base.en")  # installed, not running
+        self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": True, "delete": True})
+        self.assertIn("speech model changes after restarting", self.note())
+        self.pick("stt-small.en")  # running
+        self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": False, "delete": False})
+        self.pick("tts-kokoro")
+        self.assertFalse(self.btns()["delete"])  # the standard voice is chosen and running
+        self.pick("tts-kokoro-fp16")
+        self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": True, "delete": True})
+        self.assertIn("voice model changes after restarting", self.note())
+        self.assertIn("Sound quality not checked yet", self.on_ui(lambda: self.win.model_detail.cget("text")))
+        self.pick("tts-kokoro-int8")
+        self.assertTrue(self.btns()["download"])
+
+    def test_use_on_speech_sets_stt_model_and_save_writes_only_that_key(self):
         self.open_models(self.host_with())
-        for mid in ("stt-small.en", "stt-large-v3-turbo", "tts-kokoro", "tts-kokoro-int8"):
+        self.pick("stt-base.en")
+        self.on_ui(self.win._model_use)
+        self.assertEqual(self.row("stt-base.en")[2], "Chosen (press Save)")
+        self.assertNotIn("base.en", self.cfg_path.read_text("utf-8"))  # nothing is written before Save
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertTrue(ok)
+        self.assertEqual(changes, {"stt.model": "base.en"})
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. 1 setting needs a restart")
+        self.assertIn('model = "base.en"', self.cfg_path.read_text("utf-8"))
+        self.assertIn("# my favourite", self.cfg_path.read_text("utf-8"))
+        self.assertEqual(self.row("stt-base.en")[2], "Chosen (restart Parley)")
+        self.assertEqual(self.row("stt-small.en")[2], "In use")  # still what is running
+
+    def test_use_on_voice_maps_the_catalog_id_to_the_variant(self):
+        self.open_models(self.host_with())
+        self.pick("tts-kokoro-fp16")
+        self.on_ui(self.win._model_use)
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertTrue(ok)
+        self.assertEqual(changes, {"tts.model": "fp16"})
+        self.assertEqual(self.row("tts-kokoro-fp16")[2], "Chosen (press Save)")
+        self.assertTrue(self.row("tts-kokoro-fp16")[0].startswith("Kokoro (half precision)"))
+        self.assertTrue(self.row("tts-kokoro-fp16")[0].endswith("recommended"))  # the chosen file carries the mark (recommended_ids)
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. 1 setting needs a restart")
+        self.assertIn('model = "fp16"', self.cfg_path.read_text("utf-8"))
+        self.assertEqual(self.row("tts-kokoro-fp16")[2], "Chosen (restart Parley)")
+        self.assertEqual(self.row("tts-kokoro")[2], "In use")
+        self.pick("tts-kokoro-fp16")  # chosen already: nothing more to do, and it cannot be deleted
+        self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": False, "delete": False})
+
+    def test_choosing_in_each_section_keeps_the_other_choices(self):
+        self.open_models(self.host_with())
+        for mid in ("llm-small", "stt-base.en", "tts-kokoro-fp16"):
             self.pick(mid)
-            self.assertEqual(self.btns(), {"download": False, "cancel": False, "use": False, "delete": False}, mid)
-            self.assertIn("next update", self.note())
+            self.on_ui(self.win._model_use)
+        changes, _ok = self.on_ui(self.win.collect)
+        self.assertEqual(changes, {"llm.preset": "small", "stt.model": "base.en", "tts.model": "fp16"})
 
     def test_use_sets_pending_values_and_save_writes_only_those_keys(self):
         self.open_models(self.host_with())

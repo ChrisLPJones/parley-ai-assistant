@@ -4,9 +4,14 @@ from dataclasses import dataclass
 from . import models
 
 GROUPS = (("stt", "Speech recognition (Whisper)"), ("llm", "Language model"), ("tts", "Voice (Kokoro)"))
-LIVE_KINDS = frozenset({"llm"})  # kinds whose Download / Use / Delete work today; the rest are listed read-only
-COMING_SOON = "Choosing and downloading this kind of model is coming in the next update."
-LLM_RESTART_NOTE = "Press Save to choose it. The language model changes after restarting Parley."
+LIVE_KINDS = frozenset({"llm", "stt", "tts"})  # kinds whose Download / Use / Delete work; others would be listed read-only
+RESTART_NOTES = {  # shown when Use is possible: nothing changes until Save, and then only after a restart
+    "llm": "Press Save to choose it. The language model changes after restarting Parley.",
+    "stt": "Press Save to choose it. The speech model changes after restarting Parley.",
+    "tts": "Press Save to choose it. The voice model changes after restarting Parley.",
+}
+LLM_RESTART_NOTE = RESTART_NOTES["llm"]
+UNCHECKED_SOUND = "Sound quality not checked yet."  # fp16 / int8 Kokoro files: nobody has listened to them
 OWN_REPLACE_NOTE = "This replaces your own model setting when you press Save."
 OWN_ID = "own-file"
 SYMBOLS = {"good": "✓", "slow": "!", "no": "✗"}  # check, exclamation, cross: the word is always shown too
@@ -100,7 +105,7 @@ def actions(m: models.Model | None, st: models.Status | None, *, in_use: bool, s
     running = dl.phase in ("downloading", "verifying")
     mine = running and dl.model_id == m.id
     if m.kind not in LIVE_KINDS:
-        return Actions(False, False, False, False, COMING_SOON)
+        return Actions(False, False, False, False)
     installed = st.state == "installed"
     can_download = m.pinned and st.state in ("not_installed", "partial", "legacy") and not running
     note = ""

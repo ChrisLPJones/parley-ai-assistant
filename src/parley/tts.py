@@ -6,14 +6,20 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gpu
+from . import gpu, models
 from .config import TtsConfig
-from .download import download
 
 log = logging.getLogger(__name__)
 
-MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
-MODEL_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
+VOICES_FILE = "voices-v1.0.bin"  # shared by every Kokoro variant
+
+
+def model_files(cfg: TtsConfig) -> tuple[str, str]:
+    """(model file, voices file) for `tts.model`, from the pinned catalog. A name the catalog does not know is refused."""
+    if cfg.model not in ("default", "fp16", "int8"):
+        raise SystemExit(f"Unknown tts.model {cfg.model!r}; choose default, fp16 or int8")
+    m = models.CATALOG[models.tts_id(cfg.model)]
+    return next(n for n in m.names if n != VOICES_FILE), VOICES_FILE
 
 
 class Speaker:
@@ -22,10 +28,11 @@ class Speaker:
         from kokoro_onnx import Kokoro
 
         self.cfg = cfg
-        for name in MODEL_FILES:
-            if not (model_dir / name).exists():
-                log.info("Downloading voice model %s, first run only ...", name)
-                download(MODEL_URL + name, model_dir / name)
+        model_file, voices_file = model_files(cfg)
+        try:  # the verified copy from the catalog (first run downloads it, hash-checked); never an unpinned download
+            folder = models.ensure_installed(models.tts_id(cfg.model), model_dir)
+        except models.ModelError as e:
+            raise SystemExit(str(e)) from e
         start = time.perf_counter()
         ort.set_default_logger_severity(3)  # errors only; ORT warns about harmless graph details
         if cfg.device not in ("auto", "cuda", "cpu"):
@@ -38,8 +45,8 @@ class Speaker:
             gpu_providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
         else:
             gpu_providers = None
-        model = str(model_dir / MODEL_FILES[0])
-        voices = str(model_dir / MODEL_FILES[1])
+        model = str(folder / model_file)
+        voices = str(folder / voices_file)
         session = None
         if gpu_providers:
             try:

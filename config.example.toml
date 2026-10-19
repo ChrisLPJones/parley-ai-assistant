@@ -11,7 +11,7 @@ preroll_ms = 300
 sounds = true
 
 [stt]
-model = "auto"             # auto = large-v3-turbo on NVIDIA GPUs, small.en on CPU; or tiny / base / small / medium / large-v3-turbo
+model = "auto"             # auto = large-v3-turbo on NVIDIA GPUs, small.en on CPU; or tiny.en / base.en / small.en / small / medium / large-v3-turbo (downloaded and checked by Parley)
 device = "auto"            # auto | cuda | cpu
 cpu_threads = 0            # CPU only: threads for Whisper; 0 = auto (about half the logical cores, max 8)
 compute_type = "default"
@@ -59,6 +59,7 @@ voice = "af_heart"   # see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/V
 speed = 1.1
 lang = "en-us"
 device = "auto"     # auto (CUDA on NVIDIA, else CPU) | cuda | cpu
+model = "default"   # default | fp16 | int8 (Kokoro file: smaller and quicker, but the sound of fp16/int8 is not checked yet)
 
 [gpu]
 download_cuda = true  # installed (packaged) copies only: on an NVIDIA GPU, download the CUDA libraries once (about 1.6 GB) and restart Parley once when idle to use them (tray app); the CPU is used meanwhile. Not needed when stt.device and tts.device are "cpu"

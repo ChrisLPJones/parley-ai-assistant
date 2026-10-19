@@ -25,12 +25,12 @@ To remove everything, delete this folder (and the cloned repo, if you ran from s
 |---|---|---|
 | `[hotkey]` | `key` | Hold-to-talk key, default `pause` (also `f13`, `scroll_lock`, `ctrl_r`, `insert`, or a single character) |
 | `[audio]` | `input_device`, `output_device` | Name substring or index from `--list-devices` |
-| `[stt]` | `model`, `device`, `language`, `cpu_threads` | `auto` picks by hardware; language `en` by default (`""` auto-detects); Whisper CPU threads (0 = auto) |
+| `[stt]` | `model`, `device`, `language`, `cpu_threads` | `model`: `auto` picks by hardware, or `tiny.en`, `base.en`, `small.en`, `small`, `medium`, `large-v3-turbo` (only these: Parley downloads each one itself and checks it against a pinned hash; other names such as `distil-large-v3` are no longer accepted); language `en` by default (`""` auto-detects); Whisper CPU threads (0 = auto) |
 | `[llm]` | `backend` | `builtin` (default), `anthropic`, `openai`, `ollama`, `server` |
 | `[llm]` | `preset`, `model_repo`, `model_file`, `model_path` | Which local model (builtin backend) |
 | `[llm]` | `runtime` | `auto`, `cuda`, `vulkan` or `cpu` (builtin backend) |
 | `[tools]` | `enabled`, `web_search` | Let the LLM use files, apps and web search (limited to read-only access, a fixed list of openable file types and public web addresses) |
-| `[tts]` | `voice`, `speed`, `device` | Kokoro voice, speed, and `auto`/`cuda`/`cpu` |
+| `[tts]` | `voice`, `speed`, `device`, `model` | Kokoro voice, speed, `auto`/`cuda`/`cpu`, and the Kokoro file: `default`, `fp16` or `int8` (smaller and quicker; their sound quality is not checked yet; needs a restart) |
 | `[gpu]` | `download_cuda` | Packaged copies only (default `true`): download the CUDA libraries (about 1.6 GB, once) on an NVIDIA GPU; the CPU is used until they are ready, then Parley restarts itself once, when idle, to use the GPU |
 | `[updates]` | `check` | Installed copies only (default `true`): look for a newer version after startup and ask before installing; a source checkout never updates itself. The update server is fixed at build time, not configurable |
 
@@ -66,6 +66,11 @@ toolkit, model caches) is used.
 
 The local models are deliberately small so Parley runs on ordinary laptops, which means answers
 are simple.
+
+Speech and voice models are fetched the same verified way as the language models: by Parley's own list, from a fixed
+source, checked against a known size and sha256 before use (first run downloads what is missing). Whisper models live in
+`models/whisper/<name>/`. A Whisper cache made by an older Parley (`models--Systran--...`) is not used: Parley downloads the
+checked copy once more. You can pick, download and delete speech, language and voice models in Settings > Models.
 
 ## Which hardware is used
 
