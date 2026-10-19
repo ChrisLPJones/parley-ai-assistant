@@ -19,8 +19,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import cuda_pack, gpu, llama_server, update
-from .download import DownloadCancelled, DownloadError, download_verified
+from . import cuda_pack, download, gpu, llama_server, update
+from .download import DownloadCancelled, DownloadError, DownloadTruncated, download_verified
 from .model_pins import PINS
 
 log = logging.getLogger(__name__)
@@ -385,6 +385,8 @@ def _sha256_file(path: Path) -> str:
 
 def _explain(e: BaseException, label: str) -> str:
     """A short message without URLs or response bodies."""
+    if isinstance(e, DownloadTruncated):
+        return f"The {label} download ended early. Try again to continue where it stopped."
     if isinstance(e, DownloadError):
         return f"The {label} download failed its safety check, so Parley discarded it."
     if isinstance(e, cuda_pack.PackError):
@@ -405,8 +407,10 @@ class ModelManager:
                  in_use: Callable[[], set[str]] = lambda: set(),
                  opener_factory: Callable | None = None,
                  free_space: Callable[[Path], int] = free_bytes,
+                 observer: Callable[[str, int, int], None] | None = None,
                  _allow_http_localhost: bool = False) -> None:
         self.home = home
+        self._observer = observer  # (file name, done, total) per file, like download.set_observer (the tray tooltip)
         self.catalog = CATALOG if catalog is None else catalog
         self._in_use = in_use
         self._allow_http = _allow_http_localhost  # test hook only; never set from config or env
@@ -504,6 +508,13 @@ class ModelManager:
             with self._lock:
                 self._busy = False
 
+    def _notify(self, name: str, done: int, total: int) -> None:
+        if self._observer is not None:
+            try:
+                self._observer(name, done, total)
+            except Exception:  # a broken display must never fail a download
+                log.debug("download observer failed", exc_info=True)
+
     def _fetch_all(self, m: Model, cancel: threading.Event) -> None:
         d = _confined(self.home, model_dir(self.home, m))
         opener = self._factory(m.hosts)
@@ -517,9 +528,11 @@ class ModelManager:
                 continue
             dest.unlink(missing_ok=True)  # a same-named file that is not the pinned one is never trusted
 
-            def progress(done: int, total: int, base: int = base) -> None:
+            def progress(done: int, total: int, base: int = base, name: str = f.name) -> None:
                 self._set(done=base + done, phase="verifying" if done >= total else "downloading")
+                self._notify(name, done, total)
             download_verified(opener, f.url, dest, f.sha256, f.size, progress, cancel, resume=True)
+            self._notify(f.name, f.size, f.size)  # the end of a file, as download() reports it
             base += f.size
 
     def delete(self, model_id: str) -> int:
@@ -565,7 +578,8 @@ class ModelManager:
 
 def download_blocking(m: Model, home: Path, open_stream=None) -> None:
     """Download one catalog model and wait (the startup path of `llama_server.ensure_model`). Same checks as the manager."""
-    mgr = ModelManager(home, {m.id: m}, opener_factory=(lambda hosts: open_stream) if open_stream else None)
+    mgr = ModelManager(home, {m.id: m}, opener_factory=(lambda hosts: open_stream) if open_stream else None,
+                       observer=download._observer)  # first-run progress for the tray tooltip
     mgr.download(m.id)
     mgr.wait()
     st = mgr.state

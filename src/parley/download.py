@@ -89,6 +89,10 @@ class DownloadError(Exception):
     """A verified download failed (wrong size or hash, or too much data)."""
 
 
+class DownloadTruncated(DownloadError):
+    """The body ended early but cleanly. A resumable download keeps its `.part` (nothing was proven wrong)."""
+
+
 def _header(r, name: str) -> str:
     headers = getattr(r, "headers", None)
     return str(headers.get(name, "")) if headers is not None else ""
@@ -109,6 +113,7 @@ def _fetch(open_stream, url: str, part: Path, offset: int, size: int, progress, 
                 left -= len(chunk)
         ctx = open_stream(url, {"Range": f"bytes={offset}-"})
     else:
+        part.unlink(missing_ok=True)  # a link left at this name must not be written through
         ctx = open_stream(url)
     with ctx as r:
         if offset and (getattr(r, "status_code", None) != 206
@@ -130,7 +135,7 @@ def _fetch(open_stream, url: str, part: Path, offset: int, size: int, progress, 
                 digest.update(chunk)
                 f.write(chunk)
     if done != size:
-        raise DownloadError("download is truncated")
+        raise DownloadTruncated("download is truncated")
     return digest.hexdigest()
 
 
@@ -146,7 +151,7 @@ def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
     Default: always starts fresh. `resume=True` (used for the multi-GB models): an existing `.part` is re-hashed and
     continued with `open_stream(url, {"Range": ...})`, but only if the server answers 206 with a matching
     `Content-Range`; otherwise the download restarts from zero. The size and sha256 are always checked over the whole
-    file. With `resume`, a cancel or a network error keeps the `.part`; an integrity failure still deletes it.
+    file. With `resume`, a cancel, a network error or a clean short body keeps the `.part`; a size/hash failure deletes it.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
@@ -164,7 +169,7 @@ def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
             raise DownloadError("download does not match its sha256")
         part.replace(dest)
     except BaseException as e:
-        if not (resume and not isinstance(e, DownloadError)):
+        if not (resume and (not isinstance(e, DownloadError) or isinstance(e, DownloadTruncated))):
             part.unlink(missing_ok=True)
         raise
     return dest

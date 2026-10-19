@@ -391,13 +391,65 @@ class ManagerTests(Scratch):
 
     def test_tampered_short_and_oversized_downloads_fail_and_leave_nothing(self):
         m = make_model()
-        for label, data in (("tampered", DATA[:-1] + b"X"), ("short", DATA[:-5]), ("oversize", DATA + b"extra")):
+        for label, data in (("tampered", DATA[:-1] + b"X"), ("oversize", DATA + b"extra")):
             with self.subTest(label):
                 mgr = self.manager(m, FakeNet(data))
                 st = self.run_download(mgr, m.id)
                 self.assertEqual(st.phase, "error")
                 self.assertIn("safety check", st.message)
                 self.assertFalse(any((self.home / "models").rglob("a.gguf*")), label)
+
+    def test_a_clean_short_body_keeps_the_part_for_resume(self):
+        m = make_model()
+        st = self.run_download(self.manager(m, FakeNet(DATA[:-5])), m.id)
+        self.assertEqual(st.phase, "error")
+        self.assertIn("ended early", st.message)
+        part = self.home / "models" / "llm" / "a.gguf.part"
+        self.assertEqual(part.read_bytes(), DATA[:-5])
+        self.assertFalse((self.home / "models" / "llm" / "a.gguf").exists())
+        st = self.run_download(self.manager(m, FakeNet()), m.id)  # a healthy server finishes it
+        self.assertEqual(st.phase, "done", st.message)
+        # without resume (the default) a short body is still deleted
+        with self.assertRaises(DownloadError):
+            download_verified(FakeNet(DATA[:-5]), "u", self.home / "z" / "f.bin", sha(DATA), len(DATA))
+        self.assertFalse((self.home / "z" / "f.bin.part").exists())
+
+    def test_observer_gets_increasing_progress_ending_at_total(self):
+        m = make_model()
+        seen = []
+        with mock.patch.object(download, "_observer", lambda name, done, total: seen.append((name, done, total))),                 mock.patch.object(models, "free_bytes", return_value=10**12):
+            models.download_blocking(m, self.home, FakeNet())
+        self.assertGreater(len(seen), 1)
+        self.assertEqual({n for n, _, _ in seen}, {"a.gguf"})
+        dones = [d for _, d, _ in seen]
+        self.assertEqual(dones, sorted(dones))
+        self.assertEqual(seen[-1], ("a.gguf", len(DATA), len(DATA)))
+
+    def test_a_link_at_the_part_name_is_not_written_through(self):
+        m = make_model()
+        victim = self.home / "victim.bin"
+        victim.write_bytes(b"precious")
+        part = self.home / "models" / "llm" / "a.gguf.part"
+        part.parent.mkdir(parents=True)
+        try:
+            os.symlink(victim, part)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create file symlinks here")
+        st = self.run_download(self.manager(m, FakeNet()), m.id)
+        self.assertEqual(st.phase, "done", st.message)
+        self.assertEqual(victim.read_bytes(), b"precious")
+
+    def test_a_fresh_fetch_unlinks_the_part_name_before_writing(self):  # runs where symlinks can't be created
+        dest = self.home / "z" / "f.bin"
+        dest.parent.mkdir(parents=True)
+        part = dest.with_name("f.bin.part")
+        part.write_bytes(b"stale")
+        calls = []
+        real = Path.unlink
+        with mock.patch.object(Path, "unlink", lambda p, *a, **k: (calls.append(p.name), real(p, *a, **k))[1]):
+            download_verified(FakeNet(), "u", dest, sha(DATA), len(DATA))
+        self.assertEqual(calls[0], "f.bin.part")
+        self.assertEqual(dest.read_bytes(), DATA)
 
     def test_oversize_stops_as_soon_as_the_size_is_exceeded(self):
         m = make_model()
