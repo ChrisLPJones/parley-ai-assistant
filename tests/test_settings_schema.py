@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from parley import config, settings_schema as ss
+from parley import config, models, settings_schema as ss
 
 
 def config_paths() -> set[str]:
@@ -30,7 +30,7 @@ class CoverageTests(unittest.TestCase):
             self.assertIn(s.apply, ss.APPLY_MODES, s.path)
             self.assertTrue(s.label and s.help, s.path)
         self.assertEqual(ss.RESTART_PATHS, {"stt.model", "stt.device", "stt.compute_type", "stt.cpu_threads",
-                                            "tts.device", "gpu.download_cuda"})
+                                            "tts.device", "tts.model", "gpu.download_cuda"})
         self.assertEqual(ss.BY_PATH["updates.check"].apply, ss.NEXT_LAUNCH)
 
     def test_defaults_validate(self):
@@ -150,8 +150,18 @@ class ValidatorTests(unittest.TestCase):
 
     def test_free_text_fields(self):
         self.ok("stt.model", "auto")
-        self.ok("stt.model", "distil-large-v3")
-        self.bad("stt.model", "..\\x", "a b", "")
+        for name in ("tiny.en", "base.en", "small.en", "small", "medium", "large-v3-turbo"):
+            self.ok("stt.model", name)
+        # only `auto` and the catalog's models: no free-form faster-whisper names or Hub repos (they would be unpinned)
+        self.bad("stt.model", "distil-large-v3", "large-v3", "tiny", "Systran/faster-whisper-small", "..\\x", "a b", "")
+        self.assertEqual(set(ss.STT_MODEL_NAMES), {m.key for m in models.CATALOG.values() if m.kind == "stt"})
+
+    def test_tts_model_choices(self):
+        for v in ("default", "fp16", "int8"):
+            self.ok("tts.model", v)
+        self.bad("tts.model", "", "fp32", "../x", "kokoro-v1.0.onnx")
+        self.assertEqual(set(ss.TTS_MODEL_CHOICES),
+                         {models.tts_variant(m.id) for m in models.CATALOG.values() if m.kind == "tts"})
         self.ok("stt.language", "")
         self.ok("stt.language", "de")
         self.bad("stt.language", "english", "E1")

@@ -685,15 +685,22 @@ class SettingsWindow:
             self._models_again = False
             self._models_refresh()
 
-    def _chosen_key(self) -> tuple[str | None, str]:
-        """(preset the user chose, "unsaved" | "saved"); None when nothing is chosen (auto, or a custom model)."""
-        if "llm.preset" in self.model_choice:
-            key = self.model_choice["llm.preset"]
-            return key, ("saved" if key == self.base.llm.preset else "unsaved")
-        llm = self.base.llm
-        if llm.preset != "auto" and not (llm.model_repo or llm.model_path):
-            return llm.preset, "saved"
-        return None, ""
+    CHOICE_PATH = {"llm": "llm.preset", "stt": "stt.model", "tts": "tts.model"}  # the setting "Use" sets, per kind
+
+    def _chosen_key(self, kind: str = "llm") -> tuple[str | None, str]:
+        """(catalog key the user chose for this kind, "unsaved" | "saved"); None when nothing is chosen (auto, or a custom
+        language model)."""
+        path = self.CHOICE_PATH[kind]
+        saved = self._base_value(path)
+        if path in self.model_choice:
+            key = self.model_choice[path]
+            return key, ("saved" if key == saved else "unsaved")
+        if kind == "llm":
+            llm = self.base.llm
+            if llm.preset != "auto" and not (llm.model_repo or llm.model_path):
+                return llm.preset, "saved"
+            return None, ""
+        return (None, "") if saved == "auto" else (saved, "saved")
 
     def _models_fill(self) -> None:
         tree = getattr(self, "model_tree", None)
@@ -702,9 +709,9 @@ class SettingsWindow:
         keep = tree.selection()
         tree.delete(*tree.get_children())
         api = self.host.models
-        rec = models.recommended_ids(self.hw) if self.hw else set()
-        chosen, how = self._chosen_key()
+        rec = models.recommended_ids(self.hw, self._chosen_key("tts")[0] or "default") if self.hw else set()
         for kind, title in models_view.GROUPS:
+            chosen, how = self._chosen_key(kind)
             gid = f"group:{kind}"
             tree.insert("", "end", iid=gid, text=title, open=True)
             if kind == "llm" and self.model_own is not None:
@@ -714,7 +721,7 @@ class SettingsWindow:
             for m in models_view.ordered(kind, api.catalog):
                 st = self.model_status.get(m.id, models.Status("not_installed"))
                 in_use = m.id in self.model_used
-                pick = how if (kind == "llm" and chosen == m.key and not in_use) else ""
+                pick = how if (chosen == m.key and not in_use) else ""
                 level, words = models.suitability(m, self.hw) if self.hw else ("", "Checking...")
                 size = st.bytes if st.state == "installed" else m.total_bytes
                 tags = (["inuse"] if in_use else []) + (["rec"] if m.id in rec else [])
@@ -735,7 +742,6 @@ class SettingsWindow:
             return
         m = self._selected_model()
         sel = tree.selection()
-        chosen, _how = self._chosen_key()
         if m is None:
             text = ("Your own model file. Choose a built-in model to replace it." if sel and sel[0] == models_view.OWN_ID
                     else "Select a model to see what it does.")
@@ -743,7 +749,8 @@ class SettingsWindow:
             self.model_detail.configure(text=text)
         else:
             st = self.model_status.get(m.id, models.Status("not_installed"))
-            a = models_view.actions(m, st, in_use=m.id in self.model_used, selected=m.kind == "llm" and chosen == m.key,
+            chosen, _how = self._chosen_key(m.kind)
+            a = models_view.actions(m, st, in_use=m.id in self.model_used, selected=chosen == m.key,
                                     other_chosen=chosen is not None and chosen != m.key, dl=self.host.models.state)
             detail = m.note
             if self.hw:
@@ -753,9 +760,9 @@ class SettingsWindow:
         for key, b in self.model_btns.items():
             b.state(["!disabled"] if getattr(a, key) else ["disabled"])
         note = a.note
-        if m is not None and m.kind == "llm" and a.use:
-            note = models_view.LLM_RESTART_NOTE
-            if self.model_own is not None:  # Use clears the custom repo / file / path, so say so before Save
+        if m is not None and a.use:
+            note = models_view.RESTART_NOTES[m.kind]
+            if m.kind == "llm" and self.model_own is not None:  # Use clears the custom repo / file / path, so say so before Save
                 note += " " + models_view.OWN_REPLACE_NOTE
         self.model_note.configure(text=note)
 
@@ -800,10 +807,12 @@ class SettingsWindow:
 
     def _model_use(self) -> None:
         m = self._selected_model()
-        if m is None or m.kind != "llm":
+        if m is None or m.kind not in self.CHOICE_PATH:
             return
-        # a built-in preset replaces any custom repo / file / path (they would win over the preset otherwise)
-        self.model_choice = {"llm.preset": m.key, "llm.model_repo": "", "llm.model_file": "", "llm.model_path": ""}
+        if m.kind == "llm":  # a built-in preset replaces any custom repo / file / path (they would win over the preset)
+            self.model_choice.update({"llm.preset": m.key, "llm.model_repo": "", "llm.model_file": "", "llm.model_path": ""})
+        else:  # m.key is the catalog's Whisper name / Kokoro variant, i.e. already a valid stt.model / tts.model value
+            self.model_choice[self.CHOICE_PATH[m.kind]] = m.key
         self._models_say("")
         self._models_fill()
 

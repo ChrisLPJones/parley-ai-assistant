@@ -25,6 +25,9 @@ from parley import models  # noqa: E402
 OUT = Path(__file__).resolve().parent.parent / "src" / "parley" / "model_pins.py"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 SKIP = {".gitattributes", "README.md"}
+# A Whisper model is stored as a plain folder models/whisper/<name>/ that faster-whisper opens by path: only the files it
+# reads are pinned (model.bin, config.json, tokenizer.json, vocabulary.txt|json, preprocessor_config.json).
+WHISPER_FILES = re.compile(r"model\.bin|config\.json|tokenizer\.json|vocabulary\.(txt|json)|preprocessor_config\.json")
 RELEASE_API = "https://api.github.com/repos/thewh1teagle/kokoro-onnx/releases/tags/model-files-v1.0"
 HEADER = '''"""Pinned file lists for the model catalog (`models.py`): per model id a revision and (file name, sha256, size) per file.
 
@@ -64,6 +67,8 @@ def pin_hf(client: httpx.Client, spec: dict, cross_check: bool) -> dict:
         name = e["path"]
         if e.get("type") != "file" or "/" in name or name in SKIP or (wanted is not None and name not in wanted):
             continue
+        if spec["kind"] == "stt" and not WHISPER_FILES.fullmatch(name):
+            continue
         url = f"https://huggingface.co/{repo}/resolve/{commit}/{name}"
         lfs = e.get("lfs")
         if lfs and HEX64.fullmatch(lfs.get("oid", "")):
@@ -78,6 +83,10 @@ def pin_hf(client: httpx.Client, spec: dict, cross_check: bool) -> dict:
         raise SystemExit(f"{repo}: expected {sorted(wanted)}, found {[f[0] for f in files]}")
     if not files:
         raise SystemExit(f"{repo}: no files found")
+    if spec["kind"] == "stt":
+        names = {f[0] for f in files}
+        if not {"model.bin", "config.json", "tokenizer.json"} <= names or not any(n.startswith("vocabulary.") for n in names):
+            raise SystemExit(f"{repo}: not a complete faster-whisper folder ({sorted(names)})")
     if cross_check and smallest:
         got, n = sha256_url(client, smallest[1])
         if (got, n) != (smallest[3], smallest[2]):

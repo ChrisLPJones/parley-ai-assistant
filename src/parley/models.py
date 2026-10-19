@@ -119,9 +119,9 @@ SPECS: tuple[dict, ...] = (
     _stt("large-v3-turbo", "dropbox-dash/faster-whisper-large-v3-turbo", 1600, 3.0,
          "Most accurate; made for a graphics card."),
     _tts("default", "Kokoro (standard)", "The default voice model.", "kokoro-v1.0.onnx", 354),
-    _tts("fp16", "Kokoro (half precision)", "Smaller; check that the voice sounds right to you.",
+    _tts("fp16", "Kokoro (half precision)", "Smaller. Sound quality not checked yet.",
          "kokoro-v1.0.fp16.onnx", 197),
-    _tts("int8", "Kokoro (8-bit)", "Smallest; the voice may sound rougher.", "kokoro-v1.0.int8.onnx", 120),
+    _tts("int8", "Kokoro (8-bit)", "Smallest. Sound quality not checked yet.", "kokoro-v1.0.int8.onnx", 120),
 )
 
 
@@ -146,6 +146,16 @@ def build_catalog(pins: dict[str, dict] | None = None) -> dict[str, Model]:
 
 
 CATALOG: dict[str, Model] = build_catalog()
+
+
+def tts_id(variant: str) -> str:
+    """Catalog id of a `tts.model` value (default | fp16 | int8); anything else is the standard model."""
+    return f"tts-kokoro-{variant}" if variant in ("fp16", "int8") else "tts-kokoro"
+
+
+def tts_variant(model_id: str) -> str:
+    """The `tts.model` value for a Kokoro catalog id (the reverse of tts_id)."""
+    return model_id.removeprefix("tts-kokoro-") if model_id.startswith("tts-kokoro-") else "default"
 
 
 def llm_for_file(file: str, catalog: dict[str, Model] | None = None) -> Model | None:
@@ -268,31 +278,40 @@ def suitability(m: Model, hw: Hardware) -> tuple[str, str]:
     """(level, words) for one model on this computer; level is good | slow | no. It never hides a model: the page shows
     them all with this verdict, and the user may still pick one at their own risk."""
     need = m.min_mem_gb
+    if m.kind == "stt":  # small numbers, warn only: a CPU copes with the small ones, the big ones want a GPU or memory
+        if hw.speech_runtime == "cuda" and hw.vram_mb / 1024 >= need:
+            return "good", "Fits your GPU"
+        if need <= 1.5:
+            return _cpu_fit(hw, need, "Runs on the CPU", "good")
+        return _cpu_fit(hw, need, "Runs on the CPU, slower", "slow")
     if m.kind == "llm":
         if hw.llm_runtime in ("cuda", "vulkan"):
             avail = (hw.vram_mb - (gpu.SPEECH_VRAM_MB if hw.llm_runtime == "cuda" else 0)) / 1024
             if avail >= need:
                 return "good", "Fits your GPU"
         return _cpu_fit(hw, need, "Runs on the CPU, slower", "slow")
-    if hw.speech_runtime == "cuda" and hw.vram_mb / 1024 >= need:
+    if hw.speech_runtime == "cuda" and hw.vram_mb / 1024 >= need:  # Kokoro (tts): about 1 GB whatever the file
         return "good", "Fits your GPU"
-    if need <= 1.5:
-        return _cpu_fit(hw, need, "Runs on the CPU", "good")
-    return _cpu_fit(hw, need, "Runs on the CPU, slower", "slow")
+    return _cpu_fit(hw, need, "Runs on the CPU", "good")
 
 
-def recommended_ids(hw: Hardware) -> set[str]:
-    """The model per kind the page highlights for this computer."""
+def recommended_ids(hw: Hardware, tts_model: str = "default") -> set[str]:
+    """The model per kind the page highlights for this computer. Kokoro: the file the user chose (fp16 / int8 are never
+    recommended on their own, but the chosen one keeps its mark)."""
     stt = "large-v3-turbo" if hw.speech_runtime == "cuda" else ("small.en" if hw.language == "en" else "small")
-    return {f"llm-{hw.preset}", f"stt-{stt}", "tts-kokoro"}
+    return {f"llm-{hw.preset}", f"stt-{stt}", tts_id(tts_model)}
 
 
 def ids_in_use(cfg, home: Path, stt_name: str | None = None, catalog: dict[str, Model] | None = None) -> set[str]:
     """Catalog ids the running (or configured) app uses: the LLM file, the Whisper name and the Kokoro model."""
     cat = CATALOG if catalog is None else catalog
-    used = {"tts-kokoro"}
+    used = {tts_id(getattr(getattr(cfg, "tts", None), "model", "default"))}
     if stt_name:
         used.add(f"stt-{stt_name}")
+    elif cfg.stt.model != "auto":  # not loaded yet: the configured one
+        used.add(f"stt-{cfg.stt.model}")
+    else:  # auto depends on the hardware: protect both candidates rather than probe it here
+        used |= {"stt-large-v3-turbo", "stt-small.en" if cfg.stt.language == "en" else "stt-small"}
     try:
         path, _, _ = llama_server.resolve_model(cfg.llm, home)
         used |= {m.id for m in cat.values() if m.kind == "llm" and path.name in m.names}
@@ -578,6 +597,27 @@ class ModelManager:
         except OSError as e:
             raise ModelError(f"{m.label} could not be deleted ({e.strerror or 'file error'}).") from e
         return freed
+
+
+def ensure_installed(model_id: str, kind_dir: Path, open_stream=None, catalog: dict[str, Model] | None = None) -> Path:
+    """The folder holding a catalog model's files, downloading the verified copy first when a file is missing or has the
+    wrong size (first run). `kind_dir` is `<home>/models/<kind>`; raises ModelError for an unknown id, an entry without a
+    pin, or a failed download. Used by Speaker and Transcriber instead of any unpinned download."""
+    cat = CATALOG if catalog is None else catalog
+    m = cat.get(model_id)
+    if m is None:
+        raise ModelError("Parley does not know that model.")
+    home = kind_dir.parent.parent
+    d = model_dir(home, m)
+    if kind_dir.name != KIND_DIR[m.kind]:
+        raise ModelError("That folder is not Parley's models folder.")
+    if m.files and all(_size(d / f.name) == f.size for f in m.files):
+        return d
+    if not m.pinned:
+        raise ModelError(f"Parley has no verified copy of {m.label} yet, so it will not download it.")
+    log.info("Downloading %s (verified), first run only ...", m.label)
+    download_blocking(m, home, open_stream)
+    return d
 
 
 def download_blocking(m: Model, home: Path, open_stream=None) -> None:

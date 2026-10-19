@@ -28,6 +28,8 @@ DEVICES = ("auto", "cuda", "cpu")
 COMPUTE_TYPES = ("default", "float16", "int8_float16", "int8")
 EFFORTS = ("low", "medium", "high")
 PRESET_CHOICES = ("auto", *PRESETS)
+TTS_MODEL_CHOICES = ("default", "fp16", "int8")
+STT_MODEL_NAMES = ("tiny.en", "base.en", "small.en", "small", "medium", "large-v3-turbo")  # = the catalog's Whisper keys
 # Kokoro voice prefix (first letter) -> espeak language
 VOICE_LANGS = {"a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi", "i": "it", "j": "ja", "p": "pt-br", "z": "cmn"}
 
@@ -212,7 +214,7 @@ SETTINGS: tuple[Setting, ...] = (
     _s("audio.preroll_ms", "int", "Pre-roll (ms)", "Audio kept from just before the key press so first words aren't clipped.",
        SWAP_AUDIO, range=(0, 2000), advanced=True),
     _s("audio.sounds", "bool", "Beeps", "Short beeps when recording starts and stops.", LIVE),
-    _s("stt.model", "str", "Speech model", "auto, or a faster-whisper model name such as small.en.", RESTART, advanced=True),
+    _s("stt.model", "str", "Speech model", "auto, or a Whisper model from the Models page, such as small.en.", RESTART, advanced=True),
     _s("stt.device", "choice", "Speech device", "Where speech recognition runs.", RESTART, choices=DEVICES, advanced=True),
     _s("stt.compute_type", "choice", "Speech precision", "Compute type for speech recognition.", RESTART,
        choices=COMPUTE_TYPES, advanced=True),
@@ -251,6 +253,8 @@ SETTINGS: tuple[Setting, ...] = (
     _s("tts.speed", "float", "Speaking speed", "1 is normal speed.", LIVE, range=(0.5, 2)),
     _s("tts.lang", "str", "Voice language", "Follows the voice; set automatically.", LIVE, advanced=True),
     _s("tts.device", "choice", "Voice device", "Where speech synthesis runs.", RESTART, choices=DEVICES, advanced=True),
+    _s("tts.model", "choice", "Voice model", "Which Kokoro file to use; the smaller ones are quicker (their sound is not checked yet).",
+       RESTART, choices=TTS_MODEL_CHOICES, advanced=True),
     _s("updates.check", "bool", "Check for updates", "Look for a newer version after startup (installed copies only).", NEXT_LAUNCH),
     _s("gpu.download_cuda", "bool", "Download GPU libraries", "On an NVIDIA GPU, download the CUDA libraries once (about 1.6 GB).",
        RESTART, advanced=True),
@@ -261,7 +265,9 @@ RESTART_PATHS = frozenset(s.path for s in SETTINGS if s.apply == RESTART)
 
 # Each "str" setting has its own check.
 _STR_CHECKS = {
-    "stt.model": _pattern(r"auto|[\w.-]+(/[\w.-]+)?", "not a model name", empty_ok=False),
+    # Only `auto` and the catalog's Whisper models: every one is downloaded pinned and hash-checked (no free-form repo names)
+    "stt.model": _pattern("auto|" + "|".join(re.escape(n) for n in STT_MODEL_NAMES), "choose auto or a model from the Models page",
+                          empty_ok=False),
     "stt.language": _pattern(r"[a-z]{2,3}", "use a language code such as en, or leave empty"),
     "llm.model_repo": _model_repo,
     "llm.model_file": _model_file,

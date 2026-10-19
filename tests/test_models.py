@@ -798,5 +798,322 @@ class DownloadVerifiedResume(Scratch):
         self.assertFalse(self.dest().exists())
 
 
+WHISPER_REQUIRED = {"model.bin", "config.json", "tokenizer.json"}
+WHISPER_ALLOWED = WHISPER_REQUIRED | {"vocabulary.txt", "vocabulary.json", "preprocessor_config.json"}
+
+
+class FakeByName:
+    """open_stream for a model with several files: the body depends on the file name at the end of the URL."""
+
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+
+    def __call__(self, url, headers=None):
+        return FakeNet(self.files[url.rsplit("/", 1)[1]])(url, headers)
+
+
+class WhisperSnapshotTests(Scratch):
+    """Whisper models are pinned plain folders models/whisper/<name>/ that faster-whisper opens by path."""
+
+    FILES = {"model.bin": DATA, "config.json": b'{"a": 1}' * 200, "tokenizer.json": b"{}" * 500, "vocabulary.txt": b"a\n" * 900}
+
+    def whisper(self, name="small.en"):
+        return replace(make_model(self.FILES, kind="stt", mid=f"stt-{name}", subdir=name, probe=("model.bin",)), key=name)
+
+    def test_real_pins_are_complete_plain_folders_without_extras(self):
+        for m in CATALOG.values():
+            if m.kind != "stt":
+                continue
+            names = set(m.names)
+            self.assertTrue(WHISPER_REQUIRED <= names, m.id)
+            self.assertTrue(any(n.startswith("vocabulary.") for n in names), m.id)
+            self.assertLessEqual(names, WHISPER_ALLOWED, m.id)  # nothing faster-whisper does not read
+            self.assertEqual(m.subdir, m.key)
+            self.assertEqual(models.model_dir(self.home, m), self.home / "models" / "whisper" / m.key)
+
+    def test_download_writes_every_file_into_the_folder_and_status_follows(self):
+        m = self.whisper()
+        mgr = self.manager(m, FakeByName(self.FILES))
+        self.assertEqual(mgr.status(m).state, "not_installed")
+        st = self.run_download(mgr, m.id)
+        self.assertEqual(st.phase, "done", st.message)
+        d = self.home / "models" / "whisper" / "small.en"
+        self.assertEqual({p.name for p in d.iterdir()}, set(self.FILES))
+        self.assertEqual(mgr.status(m), models.Status("installed", sum(len(b) for b in self.FILES.values())))
+
+    def test_one_file_missing_is_not_installed_and_ensure_installed_fetches_it(self):
+        m = self.whisper()
+        d = models.model_dir(self.home, m)
+        d.mkdir(parents=True)
+        for n, b in self.FILES.items():
+            (d / n).write_bytes(b)
+        (d / "tokenizer.json").unlink()
+        self.assertNotEqual(self.manager(m).status(m).state, "installed")
+        with mock.patch.object(models, "free_bytes", return_value=10**12):
+            got = models.ensure_installed(m.id, self.home / "models" / "whisper", FakeByName(self.FILES), {m.id: m})
+        self.assertEqual(got, d)
+        self.assertEqual({p.name for p in d.iterdir()}, set(self.FILES))
+
+    def test_delete_removes_the_folder_and_in_use_is_refused(self):
+        m = self.whisper()
+        self.run_download(self.manager(m, FakeByName(self.FILES)), m.id)
+        with self.assertRaises(ModelError):
+            self.manager(m, in_use=lambda: {m.id}).delete(m.id)
+        self.assertTrue(models.model_dir(self.home, m).exists())
+        freed = self.manager(m).delete(m.id)
+        self.assertEqual(freed, sum(len(b) for b in self.FILES.values()))
+        self.assertFalse(models.model_dir(self.home, m).exists())
+
+    def test_an_older_faster_whisper_cache_is_listed_but_never_loaded(self):
+        m = self.whisper()
+        (self.home / "models" / "whisper" / "models--Systran--faster-whisper-small.en").mkdir(parents=True)
+        self.assertEqual(self.manager(m).status(m).state, "legacy")  # shown as an older, unverified download
+        # ensure_installed ignores it: the verified folder is fetched instead (here refused, the entry has no pin)
+        with self.assertRaises(ModelError):
+            models.ensure_installed(m.id, self.home / "models" / "whisper", catalog={m.id: replace(m, files=())})
+
+
+class TtsVariantTests(Scratch):
+    def test_ids_and_variants_round_trip(self):
+        self.assertEqual({models.tts_id(v) for v in ("default", "fp16", "int8")},
+                         {m.id for m in CATALOG.values() if m.kind == "tts"})
+        for v in ("default", "fp16", "int8"):
+            self.assertEqual(models.tts_variant(models.tts_id(v)), v)
+        self.assertEqual(models.tts_id("nonsense"), "tts-kokoro")
+
+    def test_each_variant_has_its_own_model_file_and_shares_the_voices_file(self):
+        names = {v: CATALOG[models.tts_id(v)].names for v in ("default", "fp16", "int8")}
+        self.assertEqual(names["default"][0], "kokoro-v1.0.onnx")
+        self.assertEqual(names["fp16"][0], "kokoro-v1.0.fp16.onnx")
+        self.assertEqual(names["int8"][0], "kokoro-v1.0.int8.onnx")
+        self.assertTrue(all(n[1] == "voices-v1.0.bin" for n in names.values()))
+        self.assertEqual(len({CATALOG[models.tts_id(v)].files[1].sha256 for v in names}), 1)  # the very same pinned file
+
+    def test_ids_in_use_follows_tts_model_and_stt_model(self):
+        cfg = Config()
+        cfg.tts.model = "int8"
+        cfg.stt.model = "tiny.en"
+        used = models.ids_in_use(cfg, self.home)
+        self.assertIn("tts-kokoro-int8", used)
+        self.assertNotIn("tts-kokoro", used)
+        self.assertIn("stt-tiny.en", used)
+        cfg.stt.model = "auto"  # hardware decides: both candidates are protected until the app says which one runs
+        used = models.ids_in_use(cfg, self.home)
+        self.assertTrue({"stt-large-v3-turbo", "stt-small.en"} <= used)
+        used = models.ids_in_use(cfg, self.home, "small")  # the running name wins
+        self.assertIn("stt-small", used)
+        self.assertNotIn("stt-small.en", used)
+
+    def test_recommended_keeps_the_chosen_voice_file(self):
+        self.assertIn("tts-kokoro-int8", models.recommended_ids(Hardware(), "int8"))
+        self.assertNotIn("tts-kokoro", models.recommended_ids(Hardware(), "int8"))
+        self.assertIn("tts-kokoro", models.recommended_ids(Hardware()))
+
+    def test_deleting_one_variant_keeps_the_shared_voices_file(self):
+        voices = b"v" * 2_000_000
+        fp16 = make_model({"m16.onnx": DATA, "voices-v1.0.bin": voices}, kind="tts", mid="tts-kokoro-fp16",
+                          probe=("m16.onnx", "voices-v1.0.bin"))
+        std = make_model({"m.onnx": DATA, "voices-v1.0.bin": voices}, kind="tts", mid="tts-kokoro",
+                         probe=("m.onnx", "voices-v1.0.bin"))
+        net = FakeByName({"m16.onnx": DATA, "m.onnx": DATA, "voices-v1.0.bin": voices})
+        mgr = ModelManager(self.home, {fp16.id: fp16, std.id: std}, opener_factory=lambda hosts: net,
+                           free_space=lambda p: 100 * 1024**3)
+        for m in (fp16, std):
+            self.assertEqual(self.run_download(mgr, m.id).phase, "done")
+        mgr.delete(fp16.id)
+        d = self.home / "models" / "kokoro"
+        self.assertTrue((d / "voices-v1.0.bin").exists())  # still needed by the standard model
+        self.assertFalse((d / "m16.onnx").exists())
+        self.assertTrue((d / "m.onnx").exists())
+
+
+class SpeechFitTests(unittest.TestCase):
+    def test_stt_and_tts_verdicts_warn_only(self):
+        cpu = Hardware(ram_mb=16384, speech_runtime="cpu")
+        self.assertEqual(models.suitability(CATALOG["stt-tiny.en"], cpu), ("good", "Runs on the CPU"))
+        self.assertEqual(models.suitability(CATALOG["stt-medium"], cpu), ("slow", "Runs on the CPU, slower"))
+        self.assertEqual(models.suitability(CATALOG["tts-kokoro-int8"], cpu), ("good", "Runs on the CPU"))
+        gpu_hw = Hardware(vram_mb=8192, ram_mb=16384, speech_runtime="cuda")
+        self.assertEqual(models.suitability(CATALOG["stt-medium"], gpu_hw), ("good", "Fits your GPU"))
+        tiny = Hardware(ram_mb=2048, speech_runtime="cpu")
+        self.assertEqual(models.suitability(CATALOG["stt-large-v3-turbo"], tiny), ("no", "Too big for this computer"))
+        self.assertTrue(all(models.suitability(m, tiny)[0] in ("good", "slow", "no") for m in CATALOG.values()))
+
+
+class EnsureInstalledTests(Scratch):
+    def kokoro(self):
+        return make_model({"a.onnx": DATA}, kind="tts", mid="tts-kokoro", probe=("a.onnx",))
+
+    def test_unknown_id_and_wrong_folder_are_refused(self):
+        with self.assertRaises(ModelError):
+            models.ensure_installed("stt-nope", self.home / "models" / "whisper")
+        with self.assertRaises(ModelError):  # a kokoro model asked for in the whisper folder
+            models.ensure_installed("tts-kokoro", self.home / "models" / "whisper")
+
+    def test_present_files_are_used_without_any_download(self):
+        m = self.kokoro()
+        d = models.model_dir(self.home, m)
+        d.mkdir(parents=True)
+        (d / "a.onnx").write_bytes(DATA)
+        with mock.patch.object(models, "download_blocking") as dl:
+            self.assertEqual(models.ensure_installed(m.id, self.home / "models" / "kokoro", catalog={m.id: m}), d)
+        dl.assert_not_called()
+
+    def test_missing_file_goes_through_the_verified_manager(self):
+        m = self.kokoro()
+        with mock.patch.object(models, "free_bytes", return_value=10**12):
+            d = models.ensure_installed(m.id, self.home / "models" / "kokoro", FakeNet(), {m.id: m})
+        self.assertEqual((d / "a.onnx").read_bytes(), DATA)
+
+    def test_a_tampered_download_is_refused_and_nothing_is_kept(self):
+        m = self.kokoro()
+        with mock.patch.object(models, "free_bytes", return_value=10**12), self.assertRaises(ModelError) as cm:
+            models.ensure_installed(m.id, self.home / "models" / "kokoro", FakeNet(DATA[::-1]), {m.id: m})
+        self.assertIn("safety check", str(cm.exception))
+        self.assertFalse((self.home / "models" / "kokoro" / "a.onnx").exists())
+
+    def test_pending_pin_is_refused(self):
+        m = replace(self.kokoro(), files=())
+        with self.assertRaises(ModelError):
+            models.ensure_installed(m.id, self.home / "models" / "kokoro", catalog={m.id: m})
+
+
+class FakeOrt:
+    """Stands in for onnxruntime: records which model file the session is opened on."""
+
+    opened: list = []
+
+    @staticmethod
+    def set_default_logger_severity(n):
+        pass
+
+    @staticmethod
+    def get_available_providers():
+        return ["CPUExecutionProvider"]
+
+    class InferenceSession:
+        def __init__(self, path, providers=None):
+            FakeOrt.opened.append(path)
+
+        def get_providers(self):
+            return ["CPUExecutionProvider"]
+
+
+class FakeKokoro:
+    voices_seen: list = []
+
+    @classmethod
+    def from_session(cls, session, voices):
+        cls.voices_seen.append(voices)
+        return cls()
+
+    def create(self, text, voice=None, speed=None, lang=None):
+        import numpy as np
+        return np.zeros(10, dtype="float32"), 24000
+
+
+class SpeakerFileChoiceTests(Scratch):
+    def make(self, variant, ensure=None):
+        import sys
+
+        from parley import tts
+        from parley.config import TtsConfig
+        FakeOrt.opened, FakeKokoro.voices_seen = [], []
+        d = self.home / "models" / "kokoro"
+        asked = []
+
+        def fake_ensure(mid, kind_dir, *a, **k):
+            asked.append((mid, kind_dir))
+            return d
+        with mock.patch.dict(sys.modules, {"onnxruntime": FakeOrt, "kokoro_onnx": mock.Mock(Kokoro=FakeKokoro)}), \
+                mock.patch.object(models, "ensure_installed", ensure or fake_ensure), \
+                mock.patch.object(tts.gpu, "nvidia", return_value=None):
+            tts.Speaker(TtsConfig(model=variant, device="cpu"), d)
+        return asked, d
+
+    def test_the_model_file_follows_tts_model(self):
+        for variant, name in (("default", "kokoro-v1.0.onnx"), ("fp16", "kokoro-v1.0.fp16.onnx"),
+                              ("int8", "kokoro-v1.0.int8.onnx")):
+            with self.subTest(variant):
+                asked, d = self.make(variant)
+                self.assertEqual(asked, [(models.tts_id(variant), d)])
+                self.assertEqual(FakeOrt.opened, [str(d / name)])
+                self.assertEqual(FakeKokoro.voices_seen, [str(d / "voices-v1.0.bin")])
+
+    def test_an_unknown_variant_is_refused_before_any_download(self):
+        with self.assertRaises(SystemExit):
+            self.make("fp32", ensure=mock.Mock(side_effect=AssertionError("must not download")))
+
+    def test_no_unpinned_download_path_is_left(self):
+        from parley import tts
+        self.assertFalse(hasattr(tts, "download") or hasattr(tts, "MODEL_URL"))
+
+    def test_a_failed_verified_download_stops_with_its_message(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.make("default", ensure=mock.Mock(side_effect=ModelError("no space")))
+        self.assertEqual(str(cm.exception), "no space")
+
+
+class FakeWhisper:
+    calls: list = []
+
+    def __init__(self, path, **kw):
+        FakeWhisper.calls.append((path, kw))
+
+    def transcribe(self, audio, **kw):
+        return [], None
+
+
+class TranscriberPathTests(Scratch):
+    def make(self, name_cfg="small.en", ensure=None):
+        import sys
+
+        from parley import stt
+        from parley.config import SttConfig
+        FakeWhisper.calls = []
+        d = self.home / "models" / "whisper"
+        asked = []
+
+        def fake_ensure(mid, kind_dir, *a, **k):
+            asked.append((mid, kind_dir))
+            return kind_dir / mid.removeprefix("stt-")
+        with mock.patch.dict(sys.modules, {"faster_whisper": mock.Mock(WhisperModel=FakeWhisper)}), \
+                mock.patch.object(models, "ensure_installed", ensure or fake_ensure), \
+                mock.patch.object(stt.gpu, "add_cuda_dll_dirs"):
+            stt.Transcriber(SttConfig(model=name_cfg, device="cpu"), d)
+        return asked, d
+
+    def test_the_verified_folder_is_passed_to_whisper_offline(self):
+        asked, d = self.make("small.en")
+        self.assertEqual(asked, [("stt-small.en", d)])
+        path, kw = FakeWhisper.calls[0]
+        self.assertEqual(path, str(d / "small.en"))
+        self.assertTrue(kw["local_files_only"])
+        self.assertNotIn("download_root", kw)  # faster-whisper's own (unpinned) download can no longer run
+
+    def test_auto_on_the_cpu_uses_the_cpu_name(self):
+        asked, _d = self.make("auto")
+        self.assertEqual(asked[0][0], "stt-small.en")
+
+    def test_a_name_outside_the_catalog_is_refused_with_the_choices(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.make("distil-large-v3")
+        self.assertIn("small.en", str(cm.exception))
+        self.assertEqual(FakeWhisper.calls, [])
+
+    def test_a_failed_verified_download_stops_with_its_message(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.make("small.en", ensure=mock.Mock(side_effect=ModelError("offline")))
+        self.assertEqual(str(cm.exception), "offline")
+
+    def test_both_call_sites_use_the_same_transcriber_and_folder(self):
+        import inspect
+
+        from parley import __main__ as entry, app
+        for src in (inspect.getsource(app), inspect.getsource(entry)):
+            self.assertIn("Transcriber(cfg.stt, ", src)
+            self.assertIn('"models" / "whisper"', src)
+
+
 if __name__ == "__main__":
     unittest.main()

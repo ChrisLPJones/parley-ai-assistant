@@ -13,7 +13,7 @@ from parley import audio, hotkey, settings_schema as S
 from parley.app import Parley
 from parley.config import Config
 
-EXPECTED_RESTART = {"stt.model", "stt.device", "stt.compute_type", "stt.cpu_threads", "tts.device", "gpu.download_cuda"}
+EXPECTED_RESTART = {"stt.model", "stt.device", "stt.compute_type", "stt.cpu_threads", "tts.device", "tts.model", "gpu.download_cuda"}
 
 
 class Q:

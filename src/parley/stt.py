@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gpu
+from . import gpu, models
 from .config import SttConfig
 
 log = logging.getLogger(__name__)
@@ -58,16 +58,18 @@ class Transcriber:
         return max(4, min(8, (os.cpu_count() or 8) // 2))
 
     def _load(self, WhisperModel, name: str, device: str, compute_type: str, cpu_threads: int = 0):
-        # Stay offline once the model is cached; only the first run downloads it
-        from huggingface_hub.errors import LocalEntryNotFoundError
-
+        """Load one of the catalog's Whisper models from its own folder `models/whisper/<name>/` (pinned files, checked
+        against their sha256 when downloaded; first run downloads them). There is no unpinned fallback, and an older
+        faster-whisper cache (`models--Systran--...`) is never loaded: it was not verified."""
+        mid = f"stt-{name}"
+        if mid not in models.CATALOG:
+            raise SystemExit(f"Unknown stt.model {name!r}; choose auto or one of: "
+                             + ", ".join(m.key for m in models.CATALOG.values() if m.kind == "stt"))
         try:
-            return WhisperModel(name, device=device, compute_type=compute_type,
-                                download_root=self.model_dir, local_files_only=True, cpu_threads=cpu_threads)
-        except LocalEntryNotFoundError:
-            pass
-        log.info("Downloading speech model %s, first run only ...", name)
-        return WhisperModel(name, device=device, compute_type=compute_type, download_root=self.model_dir,
+            folder = models.ensure_installed(mid, Path(self.model_dir))
+        except models.ModelError as e:
+            raise SystemExit(str(e)) from e
+        return WhisperModel(str(folder), device=device, compute_type=compute_type, local_files_only=True,
                             cpu_threads=cpu_threads)
 
     def _warm_up(self) -> None:
