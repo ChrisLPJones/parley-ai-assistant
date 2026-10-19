@@ -7,6 +7,7 @@ GROUPS = (("stt", "Speech recognition (Whisper)"), ("llm", "Language model"), ("
 LIVE_KINDS = frozenset({"llm"})  # kinds whose Download / Use / Delete work today; the rest are listed read-only
 COMING_SOON = "Choosing and downloading this kind of model is coming in the next update."
 LLM_RESTART_NOTE = "Press Save to choose it. The language model changes after restarting Parley."
+OWN_REPLACE_NOTE = "This replaces your own model setting when you press Save."
 OWN_ID = "own-file"
 SYMBOLS = {"good": "✓", "slow": "!", "no": "✗"}  # check, exclamation, cross: the word is always shown too
 

@@ -540,6 +540,19 @@ class ModelsPageTests(WindowCase):
         self.assertEqual(self.row("llm-small")[2], "Chosen (restart Parley)")
         self.assertEqual(self.row("llm-tiny")[2], "In use")  # still what is running
 
+    def test_use_warns_that_it_replaces_a_custom_model_only_when_there_is_one(self):
+        self.open_models(self.host_with())
+        self.pick("llm-small")
+        self.assertNotIn(mv.OWN_REPLACE_NOTE, self.note())  # no custom model: no warning
+        self.on_ui(self.win.close)
+        self.cfg_path.write_text('[llm]\nmodel_repo = "someone/their-model-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
+        host = self.host_with()
+        with mock.patch.object(models, "own_llm_file", return_value=models.OwnFile("Your own file", self.home / "x.gguf", 5)):
+            self.open_models(host)
+            self.pick("llm-small")
+            self.assertIn(mv.OWN_REPLACE_NOTE, self.note())
+            self.assertIn("restarting Parley", self.note())
+
     def test_use_replaces_a_custom_model(self):
         self.cfg_path.write_text('[llm]\nmodel_repo = "someone/their-model-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
         self.open_models(self.host_with())

@@ -101,7 +101,8 @@ can still be tried, at your own risk.
 
 - **Download:** fetches the selected model and checks it. A bar shows the progress; **Cancel** stops it and keeps what
   was downloaded so the next download continues. One download runs at a time, and it carries on if you close Settings.
-- **Use:** chooses a language model. Press **Save**, then restart Parley: the language model changes after a restart.
+- **Use:** chooses a language model. Press **Save**, then restart Parley: the language model changes after a restart. If you set your own model
+  (a custom repo, file or path), this replaces that setting when you press **Save**.
 - **Delete:** removes a downloaded model after you confirm. The model in use can't be deleted.
 
 Choosing and downloading speech and voice models from this page is coming in the next update; for now they are listed only.

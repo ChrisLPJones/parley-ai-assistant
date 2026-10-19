@@ -755,6 +755,8 @@ class SettingsWindow:
         note = a.note
         if m is not None and m.kind == "llm" and a.use:
             note = models_view.LLM_RESTART_NOTE
+            if self.model_own is not None:  # Use clears the custom repo / file / path, so say so before Save
+                note += " " + models_view.OWN_REPLACE_NOTE
         self.model_note.configure(text=note)
 
     def _models_poll(self) -> None:

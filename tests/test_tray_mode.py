@@ -190,6 +190,38 @@ class TrayAppTests(ScratchHome):
         args = argparse.Namespace(config=None, restarted=False, verbose=False)
         return tray_mode.TrayApp(args, lambda app, cfg: None, tray_factory=FakeTray, welcome_dir=self.home)
 
+    def test_models_in_use_reads_the_config_without_an_app(self):
+        cfg = self.home / "config.toml"
+        cfg.write_text('[llm]\npreset = "small"\n', "utf-8")
+        app = self.make()
+        app.args.config = cfg
+        self.assertIn("llm-small", app._models_in_use())
+        self.assertNotIn("llm-medium", app._models_in_use())
+
+    def test_models_in_use_delegates_to_the_running_app(self):
+        app = self.make()
+        app.app = SimpleNamespace(models_in_use=lambda: {"llm-tiny"})
+        self.assertEqual(app._models_in_use(), {"llm-tiny"})
+
+    def test_models_in_use_fails_safe_to_every_model(self):
+        from parley import models
+
+        cfg = self.home / "config.toml"
+        app = self.make()
+        app.args.config = cfg
+        cfg.write_text("this is [not toml", "utf-8")
+        self.assertEqual(app._models_in_use(), set(models.CATALOG))  # bad TOML: nothing may be deleted
+        with mock.patch.object(tray_mode.config, "load", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(app._models_in_use(), set(models.CATALOG))
+        with mock.patch.object(tray_mode.config, "load", side_effect=ValueError("bad")):
+            self.assertEqual(app._models_in_use(), set(models.CATALOG))
+
+    def test_shutdown_cancels_a_running_model_download(self):
+        app = self.make()
+        app.models = SimpleNamespace(cancel=mock.Mock())
+        app.shutdown()
+        app.models.cancel.assert_called_once_with()
+
     def test_startup_error_is_short_redacted_and_keeps_running(self):
         app = self.make()
         app._fail(f"Bad key {SECRET} " + "x" * 400)

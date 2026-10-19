@@ -182,7 +182,7 @@ class TrayApp:
             return app.models_in_use()
         try:
             return models.ids_in_use(config.load(self.args.config), self.home)
-        except SystemExit:  # a mistake in config.toml: keep every model
+        except (SystemExit, OSError, ValueError):  # a mistake in or trouble reading config.toml: keep every model
             return set(models.CATALOG)
 
     # ---- life cycle ----
