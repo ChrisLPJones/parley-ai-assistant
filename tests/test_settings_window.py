@@ -934,9 +934,9 @@ class LlmPageTests(WindowCase):
                     self.assertNotIn(key.encode(), f.read_bytes(), f.name)
 
     # -- the page itself
-    def test_page_is_in_the_navigation_after_models(self):
+    def test_page_is_in_the_navigation_after_models_and_before_advanced(self):
         self.open_llm()
-        self.assertEqual([k for k, _t in sw.PAGES][-2:], ["models", "llm"])
+        self.assertEqual([k for k, _t in sw.PAGES][-3:], ["models", "llm", "advanced"])
         self.assertEqual(self.on_ui(lambda: self.win.page), "llm")
 
     def test_fields_come_from_config_and_the_key_is_not_one_of_them(self):
@@ -1275,6 +1275,198 @@ class LlmPageTests(WindowCase):
         self.assertNotIn(KEY, "\n".join(self.records))
 
 
+class AdvancedPageTests(WindowCase):
+    """The Advanced page: the settings no other page shows, restart notes, About, update check and folder buttons."""
+
+    def open_adv(self, state=None, update_state=None, **host_kw):
+        self.cfg_path.write_text('# my notes\n[tts]\nspeed = 1.1  # fast\n[stt]\nbeam_size = 3  # careful\n', "utf-8")
+        host, _h, _ = ui_preview.build_host(state, home=self.home, page="advanced", update_state=update_state)
+        for k, v in host_kw.items():
+            setattr(host, k, v)
+        self.host, self.app = host, host.app
+        self.win = ui.call(lambda: sw.SettingsWindow(ui.root(), host, "advanced"))
+        return self.win
+
+    def wait_for(self, fn, timeout=5):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.on_ui(fn):
+                return
+            time.sleep(0.05)
+        self.fail("condition never became true")
+
+    def test_page_is_last_in_the_navigation(self):
+        self.open_adv()
+        self.assertEqual([k for k, _t in sw.PAGES][-1], "advanced")
+        self.assertEqual(self.on_ui(lambda: self.win.page), "advanced")
+
+    def test_every_setting_has_exactly_one_page(self):
+        self.open_adv()
+        shown = [p for _t, paths in sw.ADVANCED_TABS for p in paths]
+        self.assertEqual(len(shown), len(set(shown)))
+        fields = self.on_ui(lambda: set(self.win.fields))
+        self.assertTrue(set(shown) <= fields)
+        self.assertFalse(set(shown) & (set(sw.GENERAL_FIELDS) | set(sw.VOICE_FIELDS)))
+        # Models page ("Use") owns these three; tts.lang follows the voice
+        owned_elsewhere = {"stt.model", "tts.model", "llm.preset", *sw.NOT_ON_ADVANCED}
+        self.assertEqual(set(S.BY_PATH) - fields - {"llm.api_key"}, owned_elsewhere)  # no setting is left without a control
+        for p in ("llm.num_ctx", "llm.think", "llm.effort"):  # already on the LLM page: not repeated here
+            self.assertNotIn(p, shown)
+
+    def test_values_come_from_config_and_nothing_changes_until_edited(self):
+        self.open_adv()
+        values = self.on_ui(lambda: {p: self.win.fields[p].to_value() for _t, ps in sw.ADVANCED_TABS for p in ps})
+        self.assertEqual(values["stt.beam_size"], 3)
+        self.assertEqual(values["llm.gpu_layers"], -1)
+        self.assertEqual(self.on_ui(self.win.collect), ({}, True))
+
+    def test_save_writes_only_the_edited_key_and_keeps_comments(self):
+        self.open_adv()
+        self.on_ui(lambda: self.win._entry_vars["audio.preroll_ms"].set("400"))
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertEqual((changes, ok), ({"audio.preroll_ms": 400}, True))
+        self.on_ui(self.win.save)
+        self.wait_banner("Applied")
+        out = self.cfg_path.read_text("utf-8")
+        self.assertIn("preroll_ms = 400", out)
+        self.assertIn("# my notes", out)
+        self.assertIn("beam_size = 3  # careful", out)
+        self.assertIn("# fast", out)
+        self.assertNotIn("gpu_layers", out)
+
+    def test_invalid_value_blocks_save_with_the_schema_sentence(self):
+        self.open_adv()
+        self.on_ui(lambda: self.win._entry_vars["stt.beam_size"].set("50"))
+        self.assertIn("between 1 and 10", self.on_ui(lambda: self.win.errors["stt.beam_size"]))
+        self.assertTrue(self.save_disabled())
+        self.on_ui(lambda: self.win._entry_vars["stt.beam_size"].set("abc"))
+        self.assertIn("whole number", self.on_ui(lambda: self.win.errors["stt.beam_size"]))
+
+    def test_restart_needed_settings_say_so_and_the_banner_names_them(self):
+        self.assertEqual(sw.help_text(S.BY_PATH["stt.device"]), S.BY_PATH["stt.device"].help + sw.RESTART_NOTE)
+        self.assertNotIn("restart", sw.help_text(S.BY_PATH["stt.beam_size"]))  # live: no note
+        self.assertEqual(sw.help_text(S.BY_PATH["gpu.download_cuda"]).count("restart"), 1)
+        self.open_adv()
+
+        def pick():
+            self.win.fields["stt.device"].widgets[0].set("cpu")
+            self.win._changed("stt.device")
+
+        self.on_ui(pick)
+        self.assertEqual(self.on_ui(self.win.collect), ({"stt.device": "cpu"}, True))
+        self.on_ui(self.win.save)
+        text, kind = self.wait_banner("Saved. 1 setting needs a restart")
+        self.assertIn("Speech device", text)
+        self.assertEqual(kind, "warn")
+
+    def test_models_use_clears_the_custom_model_entries_so_they_are_not_written_back(self):
+        self.cfg_path.write_text('[llm]\nmodel_repo = "someone/Some-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
+        host, _h, _ = ui_preview.build_host(home=self.home, page="advanced")
+        self.host = host
+        self.win = ui.call(lambda: sw.SettingsWindow(ui.root(), host, "advanced"))
+        self.assertEqual(self.on_ui(lambda: self.win._entry_vars["llm.model_repo"].get()), "someone/Some-GGUF")
+        self.wait_for(lambda: self.win.model_tree.exists("llm-small"))
+        self.on_ui(lambda: (self.win.model_tree.selection_set("llm-small"), self.win._model_use()))
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertTrue(ok)
+        self.assertEqual((changes["llm.model_repo"], changes["llm.model_file"]), ("", ""))
+        self.assertEqual(self.on_ui(lambda: self.win._entry_vars["llm.model_repo"].get()), "")
+
+    def test_numbers_show_their_allowed_range_and_default_from_the_schema(self):
+        from parley import config
+
+        for path in sw.ADVANCED_PATHS:
+            st = S.BY_PATH[path]
+            if st.type not in ("int", "float"):
+                continue
+            lo, hi = st.range
+            table, key = path.split(".")
+            text = sw.help_text(st)
+            self.assertIn(f"Allowed: {lo} to {hi}", text, path)
+            self.assertIn(f"default {getattr(getattr(config.Config(), table), key)}.", text, path)
+            self.assertTrue(S.validate(path, lo) == lo and S.validate(path, hi) == hi, path)  # the stated limits are accepted
+            with self.assertRaises(ValueError):  # and one step outside is not
+                S.validate(path, hi + 1)
+        self.assertIn("Allowed: 1 to 10, default 1.", sw.help_text(S.BY_PATH["stt.beam_size"]))
+        self.assertIn("Allowed: -1 to 999, default -1.", sw.help_text(S.BY_PATH["llm.gpu_layers"]))
+        self.assertNotIn("Allowed", sw.help_text(S.BY_PATH["llm.num_ctx"]))  # other pages keep their own wording
+
+    def test_device_lines_follow_the_dropdown_with_fake_hardware(self):
+        self.open_adv()
+        self.wait_for(lambda: "RTX 3060" in self.win._hw_labels["stt.device"][1].get())
+        line = lambda p: self.on_ui(lambda: self.win._hw_labels[p][1].get())  # noqa: E731
+        note = lambda p: self.on_ui(lambda: self.win._hw_labels[p][0].get())  # noqa: E731
+        self.assertEqual(line("stt.device"), "Runs on: NVIDIA GeForce RTX 3060 Laptop GPU, 6 GB.")
+        self.assertIn("Auto (recommended)", note("stt.device"))
+
+        def pick(path, value):
+            self.win.fields[path].widgets[0].set(value)
+            self.win._hw_refresh(path)
+
+        self.on_ui(lambda: pick("stt.device", "cpu"))
+        self.assertIn("AMD Ryzen 7 5800H", line("stt.device"))
+        self.assertIn("main processor", note("stt.device"))
+        self.on_ui(lambda: pick("llm.runtime", "vulkan"))
+        self.assertIn("RTX 3060", line("llm.runtime"))
+        self.on_ui(lambda: pick("stt.compute_type", "int8"))
+        self.assertIn("Int8", note("stt.compute_type"))
+
+    def test_no_driver_word_anywhere_on_the_page(self):
+        self.open_adv()
+        self.wait_for(lambda: "RTX 3060" in self.win._hw_labels["stt.device"][1].get())
+        dump = self.on_ui(lambda: widget_dump(self.win))
+        self.assertNotIn("driver", dump.lower())
+        self.assertNotIn("driver", " ".join(st.help for st in S.SETTINGS).lower())
+
+    def test_about_shows_the_version(self):
+        from parley import __version__
+
+        self.open_adv()
+        self.assertEqual(self.on_ui(lambda: self.win.version_label.cget("text")), f"Parley {__version__}")
+
+    def test_update_check_sentences(self):
+        cases = {None: "Parley 0.1.0 is up to date.", "offline": "Could not check for updates. Check your internet connection.",
+                 "update-available": "Version 0.2.0 is available. You chose not to install it now."}
+        for state, want in cases.items():
+            with self.subTest(state=state):
+                self.close()
+                self.open_adv(update_state=state)
+                self.on_ui(self.win._check_updates)
+                self.assertTrue(self.on_ui(lambda: self.win.update_btn.instate(["disabled"])))  # busy while asking
+                self.wait_for(lambda: self.win.update_note.cget("text") == want)
+                self.assertTrue(self.on_ui(lambda: self.win.update_btn.instate(["!disabled"])))
+
+    def test_a_crashing_update_check_is_one_sentence(self):
+        def boom(notify):
+            raise RuntimeError("secret detail")
+
+        with self.assertLogs("parley.settings_window", "ERROR"):
+            self.open_adv(check_updates=boom)
+            self.on_ui(self.win._check_updates)
+            self.wait_for(lambda: self.win.update_note.cget("text") == "Could not check for updates.")
+
+    def test_without_the_hooks_the_buttons_are_off_and_nothing_breaks(self):
+        self.open_adv(check_updates=None, open_log_folder=None, open_home_folder=None)
+        self.assertTrue(self.on_ui(lambda: all(b.instate(["disabled"]) for b in (self.win.update_btn, self.win.log_btn, self.win.home_btn))))
+        self.on_ui(self.win._check_updates)
+        self.on_ui(lambda: self.win._open_folder(None))
+
+    def test_folder_buttons_call_their_opener_and_show_a_failure(self):
+        calls = []
+        self.open_adv(open_log_folder=lambda: calls.append("log") or "", open_home_folder=lambda: calls.append("home") or "No.")
+        self.on_ui(self.win.log_btn.invoke)
+        self.on_ui(self.win.home_btn.invoke)
+        self.assertEqual(calls, ["log", "home"])
+        self.assertEqual(self.on_ui(lambda: self.win.folder_note.cget("text")), "No.")
+
+    def test_no_address_text_in_any_label(self):
+        import re
+
+        self.open_adv()
+        dump = self.on_ui(lambda: widget_dump(self.win))
+        self.assertIsNone(re.search(r"https?://|\b\d{1,3}(\.\d{1,3}){3}\b|localhost", dump))
+
+
 class TrayWiringTests(unittest.TestCase):
     """TrayApp.open_settings -> a real window; shutdown closes it (the `--tray --smoke` path, with a fake tray)."""
 
@@ -1414,6 +1606,17 @@ class PreviewSmokeTests(unittest.TestCase):
             with self.subTest(state=state), tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
                 env = {**os.environ, "PARLEY_HOME": str(Path(tmp) / "parley_test_ui_smoke")}
                 r = subprocess.run([sys.executable, "-m", "parley.ui_preview", "--smoke", "--page", "llm", "--state", state],
+                                   capture_output=True, text=True, timeout=120, env=env, cwd=ROOT)
+            if r.returncode == 1 and "could not start" in r.stderr:
+                self.skipTest("no display for Tk")
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+
+    def test_ui_preview_advanced_page_opens_in_each_state(self):
+        for state in (None, "restart-needed", "offline", "update-available"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
+                env = {**os.environ, "PARLEY_HOME": str(Path(tmp) / "parley_test_ui_smoke")}
+                extra = ["--state", state] if state else []
+                r = subprocess.run([sys.executable, "-m", "parley.ui_preview", "--smoke", "--page", "advanced", *extra],
                                    capture_output=True, text=True, timeout=120, env=env, cwd=ROOT)
             if r.returncode == 1 and "could not start" in r.stderr:
                 self.skipTest("no display for Tk")

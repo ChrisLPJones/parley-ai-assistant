@@ -1,4 +1,4 @@
-"""Dev tool: screenshots of the real Settings window (stub app, throwaway home) for light/dark x 100/150 %, General, Voice and Models.
+"""Dev tool: screenshots of the real Settings window (stub app, throwaway home) for light/dark x 100/150 %, General, Voice, Models, LLM and Advanced pages.
 
     uv run python scripts/shot_window.py [--out DIR] [--themes light dark] [--scales 100 150] [--no-sample]
 
@@ -137,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
                 shoot("general", "general", theme, scale)
                 shoot("voice", "voice", theme, scale)
                 shoot("models", "models", theme, scale, models_state="downloading")
+                shoot("advanced", "advanced", theme, scale)
+                shoot("advanced-hardware", "advanced", theme, scale, act=lambda w: w.advanced_tabs.select(1))
                 if not args.no_sample:
                     shoot("voice-playing", "voice", theme, scale, act=lambda w: w.sample_btn.invoke())
                     shoot("models-error", "models", theme, scale, models_state="download-error")

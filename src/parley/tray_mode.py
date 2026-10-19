@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import config, credstore, download, instance, logsetup, models, tray, ui
+from . import __version__, actions, config, credstore, download, instance, logsetup, models, tray, ui
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +159,9 @@ class TrayApp:
                 args.config or config.default_config_path(),
                 get_app=lambda: self.app, get_error=lambda: self.error, restart=self.restart_app,
                 get_hotkey=lambda: self.hotkey, on_applied=self._on_applied, models_api=self.models,
-                keys_api=credstore.default_store())
+                keys_api=credstore.default_store(), check_updates=self.check_updates_with,
+                open_log_folder=lambda: actions.open_log_folder(self.home),
+                open_home_folder=lambda: actions.open_parley_folder(self.home))
         except ImportError as e:
             log.warning("Settings are unavailable: %s", e)
         self.app = self.flow = self.hotkey = None
@@ -439,6 +441,7 @@ class TrayApp:
             on_open_logs=threaded(self.open_logs, "open-logs"),
             on_quit=threaded(self.request_quit, "quit"),
             can_check_updates=can_update,
+            version=__version__,
         ))
 
     def open_settings(self) -> None:
@@ -489,14 +492,17 @@ class TrayApp:
         except OSError as e:
             log.warning("Cannot restart: %s", e)
 
+    def check_updates_with(self, notify: Callable[[str], None]) -> None:
+        """The update check; the tray menu shows the result as a balloon, the Advanced page as a sentence."""
+        actions.check_for_updates(self.flow, notify)
+
     def check_updates(self) -> None:
-        if self.flow is not None:
-            self.flow.check_now(lambda msg: self.tray.balloon("Parley", msg))
+        self.check_updates_with(lambda msg: self.tray.balloon("Parley", msg))
 
     def open_logs(self) -> None:
-        d = logsetup.log_dir(self.home)
-        d.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(d))  # noqa: S606 - our own folder
+        problem = actions.open_log_folder(self.home)
+        if problem:
+            self.tray.balloon("Parley", problem)
 
 
 def _recoverable(e: Exception) -> bool:

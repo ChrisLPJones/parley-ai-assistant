@@ -1,4 +1,6 @@
 # Parley settings. Copy to %LOCALAPPDATA%\parley\config.toml (or $PARLEY_HOME/config.toml). Every key is optional.
+# Most keys apply as soon as you save them in Settings. These need a restart of Parley (Settings offers Restart now):
+# stt.model, stt.device, stt.compute_type, stt.cpu_threads, tts.device, tts.model, gpu.download_cuda.
 
 [hotkey]
 # Hold to talk. pynput key names: pause, f13, scroll_lock, ctrl_r, insert, or a single character

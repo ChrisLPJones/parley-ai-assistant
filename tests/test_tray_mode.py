@@ -251,6 +251,62 @@ class TrayAppTests(ScratchHome):
         self.assertFalse(app.tray.items[0].enabled)
         self.assertNotIn("check_updates", ids)
 
+    def menu_item(self, app, item_id):
+        app._refresh_menu()
+        return next(i for i in app.tray.items if i.id == item_id)
+
+    def test_menu_has_the_version_line_disabled(self):
+        from parley import __version__
+
+        item = self.menu_item(self.make(), "about")
+        self.assertEqual((item.label, item.enabled), (f"Parley {__version__}", False))
+
+    def test_open_logs_opens_only_the_log_folder_of_the_home(self):
+        app = self.make()
+        opened = []
+        with mock.patch("parley.actions.os.startfile", opened.append, create=True):
+            self.menu_item(app, "open_logs").callback()
+            deadline = time.monotonic() + 3
+            while not opened and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self.assertEqual(opened, [str(logsetup.log_dir(app.home))])
+
+    def test_open_logs_failure_is_a_balloon_not_a_crash(self):
+        app = self.make()
+
+        def boom(_path):
+            raise OSError("no")
+
+        with mock.patch("parley.actions.os.startfile", boom, create=True):
+            app.open_logs()
+        self.assertTrue(any(c[0] == "balloon" and "could not be opened" in c[2] for c in app.tray.calls))
+
+    def test_check_updates_menu_and_settings_button_use_the_same_flow_call(self):
+        app = self.make()
+        said = []
+        app.flow = SimpleNamespace(updater=object(), check_now=lambda notify: notify("Parley 0.1.0 is up to date."))
+        app._refresh_menu()
+        app.check_updates()  # the menu entry: result as a balloon
+        self.assertTrue(any(c[0] == "balloon" and c[2] == "Parley 0.1.0 is up to date." for c in app.tray.calls))
+        app.settings_host.check_updates(said.append)  # the Advanced page button: result as a sentence
+        self.assertEqual(said, ["Parley 0.1.0 is up to date."])
+        self.assertIn("check_updates", [i.id for i in app.tray.items])
+
+    def test_check_updates_without_a_flow_says_why(self):
+        app = self.make()
+        said = []
+        app.settings_host.check_updates(said.append)
+        self.assertEqual(len(said), 1)
+        self.assertIn("installed copy", said[0])
+
+    def test_advanced_page_folder_buttons_are_the_same_fixed_folders(self):
+        app = self.make()
+        opened = []
+        with mock.patch("parley.actions.os.startfile", opened.append, create=True):
+            self.assertEqual(app.settings_host.open_log_folder(), "")
+            self.assertEqual(app.settings_host.open_home_folder(), "")
+        self.assertEqual(opened, [str(logsetup.log_dir(app.home)), str(app.home)])
+
     def test_download_shows_percent_in_tooltip_and_menu(self):
         app = self.make()
         app._on_download("model.gguf", 430, 1000)
