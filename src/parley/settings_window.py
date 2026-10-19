@@ -1,16 +1,19 @@
-"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice, Models.
+"""The Settings window (tkinter / ttk with the sv_ttk theme). Pages: General, Voice, Models, LLM.
 
 Runs on the UI thread (`ui.py`); other threads reach it only through `open_settings()` / `ui.post`. Every control comes
 from a `settings_schema.Setting` (label, help, range, validation) and is checked on each change: an invalid value shows an
 inline message and blocks Save. Save writes only the changed keys through `config_io.save_changes` (comments and outside
 edits survive), then `app.apply_config(new)` makes them live and the banner says "Applied" or "N settings need a restart".
-An API key never appears here: keys live in the credential store and are not on these pages.
+An API key never goes through Save: the LLM page has its own masked entry with Save key / Remove / Test key buttons that talk
+to the credential store only (`Host.keys`), never to config.toml, the settings table or any message. The entry is cleared as
+soon as it is used and a stored key is never shown.
 
 `Host` is everything the window needs from the running app (config path, the `Parley` object once it exists, restart,
 hotkey capture, device lists, autostart); `ui_preview.py` supplies a stub, tray mode the real one.
 """
 import copy
 import logging
+import os
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -18,12 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import (autostart, config, config_io, hotkey as hotkey_mod, models, models_view, settings_schema, ui,
+from . import (autostart, config, config_io, credstore, hotkey as hotkey_mod, models, models_view, settings_schema, ui,
                voices)
 
 log = logging.getLogger(__name__)
 
-PAGES = (("general", "General"), ("voice", "Voice"), ("models", "Models"))
+PAGES = (("general", "General"), ("voice", "Voice"), ("models", "Models"), ("llm", "LLM"))
 GENERAL_FIELDS = ("hotkey.key", "audio.input_device", "audio.output_device", "audio.sounds", "@autostart", "updates.check")
 VOICE_FIELDS = ("tts.voice", "tts.speed")
 SYSTEM_DEFAULT = "System default"
@@ -31,6 +34,26 @@ CAPTURE_TIMEOUT_MS = 10_000
 POLL_MS = 250
 SPEED_STEP = 0.05
 MAX_LISTED = 6  # setting names spelled out in a banner
+BACKEND_LABELS = {"builtin": "Built-in (runs on this computer)", "ollama": "Ollama (on this computer)",
+                  "server": "Your own server (OpenAI-compatible)", "openai": "OpenAI (cloud)", "anthropic": "Anthropic Claude (cloud)"}
+PROVIDER_NAMES = {"openai": "OpenAI", "anthropic": "Anthropic"}
+ALL_BACKENDS = tuple(BACKEND_LABELS)
+LOCAL_SERVERS = ("ollama", "server")
+# Which backends each language model setting applies to (a field left out is shown for every backend). Settings of a backend
+# that is not selected are hidden and not checked or saved.
+LLM_BACKENDS = {
+    "llm.model": ("ollama", "server", "openai", "anthropic"), "llm.base_url": ("ollama", "server", "openai"),
+    "llm.effort": ("anthropic",), "llm.keep_alive": ("ollama",), "llm.num_ctx": ("builtin", "ollama"),
+    "llm.think": ("builtin", "ollama"), "llm.temperature": ("builtin", "ollama", "server"),
+}
+# Example text for the local backends (shown muted, never saved or applied; no addresses)
+LOCAL_EXAMPLES = {
+    "builtin": "Presets: tiny, small or medium. Or your own: repo unsloth/Qwen3.5-9B-GGUF with file Qwen3.5-9B-Q4_K_M.gguf (Advanced).",
+    "ollama": "Example model name: qwen3:4b",
+    "server": "Example model name: Qwen3.5-4B-Q4_K_M",
+}
+CLOUD_NOTICE = ("Your speech is still turned into text on this computer, but that text, and anything the tools read or "
+                "find, is sent to {provider}.")
 
 
 # ---------- what the window needs from the app ----------
@@ -70,7 +93,8 @@ class Host:
                  get_error: Callable[[], str | None] = lambda: None, restart: Callable[[], None] | None = None,
                  get_hotkey: Callable[[], object] = lambda: None, list_devices: Callable[[str], list[str]] = list_audio_devices,
                  autostart_api=None, on_applied: Callable[[object], None] | None = None,
-                 models_api=None, detect_hardware: Callable[[str], models.Hardware] | None = None) -> None:
+                 models_api=None, detect_hardware: Callable[[str], models.Hardware] | None = None,
+                 keys_api=None, key_check: Callable[[str, str], str] = credstore.check_key) -> None:
         self.config_path = Path(config_path)
         self._get_app, self._get_error, self._restart = get_app, get_error, restart
         self._get_hotkey = get_hotkey
@@ -79,6 +103,8 @@ class Host:
         self.on_applied = on_applied
         self.models = models_api  # a models.ModelManager (or a stub); None = the Models page says it is unavailable
         self._detect_hardware = detect_hardware
+        self.keys = keys_api  # a credstore.CredStore (or a fake); None = the LLM page says keys can't be saved here
+        self.key_check = key_check  # (backend, key) -> a plain sentence; one request to the provider's own host
 
     def hardware(self, language: str = "en") -> models.Hardware:
         """Probe this computer (slow: worker thread only)."""
@@ -170,6 +196,20 @@ class Field:
     to_value: Callable[[], object]  # the control's value as a config value; may raise ValueError
     error_label: ttk.Label | None = None
     widgets: list = field(default_factory=list)
+    row: ttk.Frame | None = None  # the row to show or hide
+    backends: tuple | None = None  # shown (and checked) only for these llm.backend values; None = always
+
+
+@dataclass
+class KeyRow:
+    """Widgets of one provider's API key row. The entry holds a key only between typing and pressing Save key."""
+    frame: ttk.Frame
+    status: ttk.Label
+    entry: ttk.Entry
+    save: ttk.Button
+    remove: ttk.Button
+    test: ttk.Button
+    message: ttk.Label
 
 
 # ---------- the window ----------
@@ -183,6 +223,8 @@ class SettingsWindow:
         self.closed = False
         self._capture_job = None
         self._banner_kind = "ok"
+        self._explicit_rows: dict[str, int] = {}  # parent widget -> next grid row (see _next_row)
+        self._llm_watch = False  # a saved language model change is loading: follow app.llm_state and report the result
         self.top = tk.Toplevel(root)
         self.top.withdraw()
         self.top.title("Parley settings")
@@ -283,6 +325,7 @@ class SettingsWindow:
         self._build_general(self.pages["general"])
         self._build_voice(self.pages["voice"])
         self._build_models(self.pages["models"])
+        self._build_llm(self.pages["llm"])
         # banner + buttons (bottom)
         bar = ttk.Frame(top, padding=(pad, 0, pad, pad))
         bar.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -320,9 +363,18 @@ class SettingsWindow:
 
     def _row(self, parent) -> ttk.Frame:
         row = ttk.Frame(parent)
-        row.grid(sticky="ew", pady=(0, self.em // 2))
+        row.grid(sticky="ew", pady=(0, self.em // 2), **self._next_row(parent))
         row.columnconfigure(0, weight=1)
         return row
+
+    def _next_row(self, parent) -> dict:
+        """Grid options for the next row of `parent`. Only for parents that show and hide rows (the LLM tabs): an implicit
+        row number would reuse the row of a hidden widget, so those get explicit ones."""
+        if str(parent) not in self._explicit_rows:
+            return {}
+        n = self._explicit_rows[str(parent)]
+        self._explicit_rows[str(parent)] = n + 1
+        return {"row": n, "column": 0}
 
     def _help_and_error(self, row, setting, first_row: int, indent: int = 0, show_help: bool = True) -> ttk.Label:
         wrap = int(self.em * 24)
@@ -359,7 +411,8 @@ class SettingsWindow:
         cb = ttk.Checkbutton(row, text=s.label, variable=var, style=style, command=lambda p=s.path: self._changed(p))
         cb.grid(row=0, column=0, sticky="w")
         err = self._help_and_error(row, s, 1, self._indent())
-        self.fields[s.path] = Field(s, var.get, err, [cb])
+        self.fields[s.path] = Field(s, var.get, err, [cb], row=row)
+        return row
 
     def _hotkey_row(self, page, s) -> None:
         row = self._row(page)
@@ -564,6 +617,7 @@ class SettingsWindow:
                 busy = False
             state, note = not busy, "Playing or busy..." if busy else ""
         self._models_poll()
+        self._llm_poll()
         if hasattr(self, "sample_btn"):
             self.sample_btn.state(["!disabled"] if state else ["disabled"])
             if note or self.sample_note.cget("text") in ("Playing or busy...", "Available once Parley has started.", "Starting..."):
@@ -831,6 +885,313 @@ class SettingsWindow:
         self._models_say(f"{m.label} deleted. {models_view.format_size(freed)} freed.", "ok")
         self._models_refresh()
 
+    # ---- page: LLM ----
+    def _build_llm(self, page) -> None:
+        self._title(page, "Language model")
+        e = self.em
+        self.keys: dict[str, KeyRow] = {}
+        self._backend_rows: list[tuple[ttk.Frame, tuple]] = []  # (row, backends it is shown for)
+        notebook = ttk.Notebook(page)
+        notebook.grid(row=1, column=0, sticky="nsew")
+        page.rowconfigure(1, weight=1)
+        model_tab, answers_tab = ttk.Frame(notebook, padding=(0, e // 2)), ttk.Frame(notebook, padding=(0, e // 2))
+        for tab in (model_tab, answers_tab):
+            tab.columnconfigure(0, weight=1)
+            self._explicit_rows[str(tab)] = 0
+        notebook.add(model_tab, text="Model")
+        notebook.add(answers_tab, text="Behavior")
+        # -- backend
+        s = settings_schema.BY_PATH["llm.backend"]
+        row = self._row(model_tab)
+        ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
+        self.backend_var = tk.StringVar(value=BACKEND_LABELS.get(self._base_value("llm.backend"), self._base_value("llm.backend")))
+        box = ttk.Combobox(row, textvariable=self.backend_var, values=[BACKEND_LABELS[b] for b in ALL_BACKENDS], state="readonly", width=40)
+        box.grid(row=1, column=0, sticky="w")
+        box.bind("<<ComboboxSelected>>", lambda ev: self._backend_changed())
+        err = self._help_and_error(row, s, 2)
+        by_label = {v: k for k, v in BACKEND_LABELS.items()}
+        self.fields["llm.backend"] = Field(s, lambda: by_label.get(self.backend_var.get(), self.backend_var.get()), err, [box], row=row)
+        wrap = int(e * 30)
+        self.llm_notice = ttk.Label(model_tab, text="", wraplength=wrap, justify="left")
+        self.llm_notice.grid(sticky="w", pady=(0, e // 2), **self._next_row(model_tab))
+        hint = ttk.Label(model_tab, text="Choose which built-in model to use on the Models page.", style="Muted.TLabel",
+                         wraplength=wrap, justify="left")
+        hint.grid(sticky="w", pady=(0, e // 2), **self._next_row(model_tab))
+        self._backend_rows.append((hint, ("builtin",)))
+        # -- model name, address (+ warning), key, effort, ...
+        self._entry_row(model_tab, "llm.model")
+        self.llm_example = ttk.Label(model_tab, text="", style="Muted.TLabel", wraplength=wrap, justify="left")
+        self.llm_example.grid(sticky="w", pady=(0, e // 2), **self._next_row(model_tab))
+        self._entry_row(model_tab, "llm.base_url")
+        self.url_warning = ttk.Label(model_tab, text="", wraplength=wrap, justify="left", foreground=self.colors["warn"])
+        self.url_warning.grid(sticky="w", pady=(0, e // 2), **self._next_row(model_tab))
+        self.url_warning.grid_remove()
+        for backend in PROVIDER_NAMES:
+            self._key_row(model_tab, backend)
+        self._choice_row(model_tab, "llm.effort")
+        self._entry_row(model_tab, "llm.keep_alive")
+        self._entry_row(model_tab, "llm.num_ctx")
+        think_row = self._bool_row(model_tab, settings_schema.BY_PATH["llm.think"])
+        self.fields["llm.think"].backends = LLM_BACKENDS["llm.think"]
+        self._backend_rows.append((think_row, LLM_BACKENDS["llm.think"]))
+        # -- answers
+        self._bool_row(answers_tab, settings_schema.BY_PATH["tools.enabled"])
+        self._bool_row(answers_tab, settings_schema.BY_PATH["tools.web_search"])
+        self._prompt_row(answers_tab)
+        self._entry_row(answers_tab, "llm.temperature")
+        self._entry_row(answers_tab, "llm.history_turns")
+        self._backend_changed(initial=True)
+
+    def _backend(self) -> str:
+        return self.fields["llm.backend"].to_value()
+
+    def _active(self, f: Field) -> bool:
+        return f.backends is None or self._backend() in f.backends
+
+    def _entry_row(self, parent, path: str) -> None:
+        s = settings_schema.BY_PATH[path]
+        cur = self._base_value(path)
+        kind = {"int": int, "float": float}.get(s.type, str)
+        row = self._row(parent)
+        ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
+        var = tk.StringVar(value=str(cur))
+        entry = ttk.Entry(row, textvariable=var, width=44 if kind is str else 12)
+        entry.grid(row=1, column=0, sticky="w")
+        err = self._help_and_error(row, s, 2)
+
+        def to_value():
+            text = var.get().strip() if kind is not str else var.get()
+            if kind is str:
+                return text
+            try:
+                return kind(text)
+            except ValueError:
+                raise ValueError(f"{s.label}: must be a {'whole number' if kind is int else 'number'}") from None
+
+        var.trace_add("write", lambda *a, p=path: self._changed(p))
+        backends = LLM_BACKENDS.get(path)
+        self.fields[path] = Field(s, to_value, err, [entry], row=row, backends=backends)
+        if backends:
+            self._backend_rows.append((row, backends))
+
+    def _choice_row(self, parent, path: str) -> None:
+        s = settings_schema.BY_PATH[path]
+        row = self._row(parent)
+        ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
+        var = tk.StringVar(value=self._base_value(path))
+        box = ttk.Combobox(row, textvariable=var, values=list(s.choices), state="readonly", width=12)
+        box.grid(row=1, column=0, sticky="w")
+        box.bind("<<ComboboxSelected>>", lambda ev, p=path: self._changed(p))
+        err = self._help_and_error(row, s, 2)
+        backends = LLM_BACKENDS.get(path)
+        self.fields[path] = Field(s, var.get, err, [box], row=row, backends=backends)
+        if backends:
+            self._backend_rows.append((row, backends))
+
+    def _prompt_row(self, parent) -> None:
+        s = settings_schema.BY_PATH["llm.system_prompt"]
+        row = self._row(parent)
+        ttk.Label(row, text=s.label).grid(row=0, column=0, sticky="w")
+        st = ttk.Style(self.top)
+        bg = st.lookup("TEntry", "fieldbackground") or ("#2b2b2b" if self.dark else "#ffffff")
+        fg = st.lookup("TEntry", "foreground") or ("#fafafa" if self.dark else "#1c1c1c")
+        text = tk.Text(row, height=6, width=48, wrap="word", bg=bg, fg=fg, insertbackground=fg, relief="flat", highlightthickness=1,
+                       highlightbackground=self.muted, undo=True, font="TkDefaultFont")
+        text.insert("1.0", self._base_value("llm.system_prompt"))
+        text.edit_modified(False)
+        text.grid(row=1, column=0, sticky="ew")
+
+        def modified(_event=None) -> None:
+            if text.edit_modified():
+                text.edit_modified(False)
+                self._changed("llm.system_prompt")
+
+        text.bind("<<Modified>>", modified)
+        reset = ttk.Button(row, text="Use the default prompt", command=lambda: (text.delete("1.0", "end"), text.insert(
+            "1.0", config.DEFAULT_SYSTEM_PROMPT)))
+        reset.grid(row=2, column=0, sticky="w", pady=(self.em // 4, 0))
+        err = self._help_and_error(row, s, 3)
+        self.fields["llm.system_prompt"] = Field(s, lambda: text.get("1.0", "end-1c"), err, [text, reset], row=row)
+
+    # -- API keys: credential store only
+    def _key_row(self, parent, backend: str) -> None:
+        e, name = self.em, PROVIDER_NAMES[backend]
+        row = self._row(parent)
+        row.columnconfigure(0, weight=0)
+        ttk.Label(row, text=f"{name} API key").grid(row=0, column=0, columnspan=4, sticky="w")
+        wrap = int(e * 30)
+        status = ttk.Label(row, text="", wraplength=wrap, justify="left", style="Muted.TLabel")
+        status.grid(row=1, column=0, columnspan=4, sticky="w")
+        entry = ttk.Entry(row, show="*", width=40)  # masked; no textvariable, never prefilled
+        entry.grid(row=2, column=0, columnspan=4, sticky="w", pady=(e // 4, 0))
+        save = ttk.Button(row, text="Save key", command=lambda b=backend: self._key_save(b))
+        remove = ttk.Button(row, text="Remove", command=lambda b=backend: self._key_remove(b))
+        test = ttk.Button(row, text="Test key", command=lambda b=backend: self._key_test(b))
+        for i, b in enumerate((save, remove, test)):
+            b.grid(row=3, column=i, sticky="w", padx=(0, e // 2), pady=(e // 4, 0))
+        message = ttk.Label(row, text="", wraplength=wrap, justify="left")
+        message.grid(row=4, column=0, columnspan=4, sticky="w")
+        row.columnconfigure(3, weight=1)
+        self.keys[backend] = KeyRow(row, status, entry, save, remove, test, message)
+        self._backend_rows.append((row, (backend,)))
+        self._key_refresh(backend)
+
+    def _key_say(self, backend: str, text: str, kind: str = "") -> None:
+        self.keys[backend].message.configure(text=text, foreground=self.colors.get(kind, ""))
+
+    def _key_state(self, backend: str) -> tuple[bool, bool, bool, str]:
+        """(saved, usable, can_save, status sentence). Only presence is read: no key value is ever displayed."""
+        store, env = self.host.keys, credstore.ENV_VARS[backend]
+        if store is None or not store.available:
+            return False, bool(os.environ.get(env)), False, (
+                f"Saving keys needs the Windows credential store, which isn't available here. Set {env} instead.")
+        try:
+            saved = store.exists(backend)
+        except credstore.CredentialError:
+            return False, False, True, "Parley couldn't read the Windows credential store."
+        if saved:
+            ignored = f" {env} in the environment is ignored." if os.environ.get(env) else ""
+            return True, True, True, "Saved in the Windows credential store." + ignored
+        if os.environ.get(env):
+            return False, True, True, f"No key saved. Parley is using {env} from the environment."
+        if self.base.llm.api_key:
+            return False, True, True, "A key is still in config.toml. Save it here, then delete that line from the file."
+        return False, False, True, "No key saved."
+
+    def _key_refresh(self, backend: str) -> None:
+        k = self.keys[backend]
+        saved, usable, can_save, text = self._key_state(backend)
+        k.status.configure(text=text)
+        k.save.configure(text="Replace key" if saved else "Save key")
+        k.save.state(["!disabled"] if can_save else ["disabled"])
+        k.entry.state(["!disabled"] if can_save else ["disabled"])
+        k.remove.state(["!disabled"] if saved else ["disabled"])
+        k.test.state(["!disabled"] if usable else ["disabled"])
+
+    def _key_save(self, backend: str) -> None:
+        k = self.keys[backend]
+        text = k.entry.get().strip()
+        k.entry.delete(0, "end")  # cleared at once, whatever happens next
+        if not text:
+            return self._key_say(backend, "Type or paste the key first.", "error")
+        if not credstore.check_key_shape(text):
+            return self._key_say(backend, "That doesn't look like an API key.", "error")
+        try:
+            credstore.replace_key(self.host.keys, backend, text)
+        except credstore.CredentialError as e:
+            self._key_refresh(backend)
+            return self._key_say(backend, str(e)[:200], "error")
+        except Exception as e:
+            log.warning("Saving the %s key failed (%s)", backend, type(e).__name__)  # the type only, never the text
+            return self._key_say(backend, "The key could not be saved.", "error")
+        finally:
+            text = ""
+        self._key_refresh(backend)
+        app = self.host.app
+        if app is not None and getattr(app.cfg.llm, "backend", None) == backend:
+            self._key_say(backend, "Key saved. Loading it now...", "ok")
+            self._llm_watch = True
+            threading.Thread(target=app.key_changed, args=(backend,), daemon=True, name="key-changed").start()
+        else:
+            self._key_say(backend, "Key saved.", "ok")
+
+    def _key_remove(self, backend: str) -> None:
+        if not messagebox.askyesno("Remove key", f"Remove the saved {PROVIDER_NAMES[backend]} key from the Windows credential store?",
+                                   parent=self.top):
+            return
+        try:
+            self.host.keys.delete(backend)
+        except credstore.CredentialError as e:
+            return self._key_say(backend, str(e)[:200], "error")
+        self._key_refresh(backend)
+        app = self.host.app
+        running = app is not None and getattr(app.cfg.llm, "backend", None) == backend
+        self._key_say(backend, "Key removed." + (" Parley keeps using it until you restart." if running else ""), "ok")
+
+    def _key_test(self, backend: str) -> None:
+        k = self.keys[backend]
+        k.test.state(["disabled"])
+        self._key_say(backend, "Asking " + PROVIDER_NAMES[backend] + "...")
+        store = self.host.keys or credstore.CredStore(credstore.UnavailableBackend())  # never the real store by accident
+        cfg, check = self.base.llm, self.host.key_check
+
+        def work() -> None:
+            try:
+                key, _source = credstore.lookup_api_key(backend, cfg, store)
+                sentence = check(backend, key)
+                del key
+            except Exception as e:
+                log.warning("Key test failed (%s)", type(e).__name__)
+                sentence = "The key could not be tested."
+            ui.post(lambda: self._key_tested(backend, sentence))
+
+        threading.Thread(target=work, daemon=True, name="key-test").start()
+
+    def _key_tested(self, backend: str, sentence: str) -> None:
+        if self.alive():
+            self._key_say(backend, sentence)
+            self._key_refresh(backend)
+
+    # -- backend switch and warnings
+    def _backend_changed(self, initial: bool = False) -> None:
+        backend = self._backend()
+        for row, backends in self._backend_rows:
+            row.grid() if backend in backends else row.grid_remove()
+        for path, f in self.fields.items():
+            if f.backends is None:
+                continue
+            if self._active(f):
+                f.row.grid()
+                if not initial:
+                    self._validate(path)
+            else:
+                f.row.grid_remove()
+                self.errors.pop(path, None)
+        provider = PROVIDER_NAMES.get(backend)
+        self.llm_notice.configure(text=CLOUD_NOTICE.format(provider=provider) if provider else "",
+                                  foreground=self.colors["warn"])
+        self.llm_notice.grid() if provider else self.llm_notice.grid_remove()
+        example = LOCAL_EXAMPLES.get(backend, "")
+        self.llm_example.configure(text=example)
+        self.llm_example.grid() if example else self.llm_example.grid_remove()
+        self._url_warning()
+        if not initial:
+            self._refresh_buttons()
+
+    def _url_warning(self) -> None:
+        backend = self._backend()
+        text = None
+        if self.fields["llm.base_url"].backends and backend in self.fields["llm.base_url"].backends:
+            url = self.fields["llm.base_url"].to_value().strip()
+            if url:
+                text = credstore.endpoint_warning(backend, url, loopback_ok=backend in LOCAL_SERVERS, host_check=backend in PROVIDER_NAMES,
+                                         show_host=False)
+        self.url_warning.configure(text=text or "")
+        self.url_warning.grid() if text else self.url_warning.grid_remove()
+
+    def _llm_poll(self) -> None:
+        """Follow a language model load that Save (or a key change) started and say how it went."""
+        if not self._llm_watch:
+            return
+        app = self.host.app
+        state = getattr(app, "llm_state", None) if app is not None else None
+        if not state:
+            return
+        kind, detail = state[0], state[1]
+        if kind in ("loading", "pending") and self._banner_kind != "error":
+            if not self.banner.cget("text").startswith("Saved. Loading") and not getattr(app, "deferred", []):
+                self.show_banner("ok", "Saved. Loading the language model (this can take a minute)...")
+        elif kind == "done":
+            self._llm_watch = False
+            self._models_refresh()  # the model that was chosen is now the one in use
+            pending = list(app.restart_pending()) if hasattr(app, "restart_pending") else []
+            text = "Saved. The new language model is ready." + (" " + restart_banner(pending) if pending else "")
+            self.show_banner("warn" if pending else "ok", text, restart_button=bool(pending))
+        elif kind == "error":
+            self._llm_watch = False
+            self.show_banner("error", f"Saved, but the new language model could not start. {detail} Parley is still using the previous one.",
+                             restart_button=True)
+
     # ---- values and validation ----
     def _base_value(self, path: str):
         table, key = path.split(".")
@@ -838,6 +1199,8 @@ class SettingsWindow:
 
     def _changed(self, path: str) -> None:
         self._validate(path)
+        if path == "llm.base_url":
+            self._url_warning()
         self._refresh_buttons()
 
     def _set_error(self, path: str, text: str) -> None:
@@ -873,7 +1236,9 @@ class SettingsWindow:
     def collect(self) -> tuple[dict[str, object], bool]:
         """({changed path: value}, all valid). Only values that differ from config.toml are changes."""
         changes, ok = {}, True
-        for path in self.fields:
+        for path, f in self.fields.items():
+            if not self._active(f):  # a setting of a backend that is not selected: not checked, not saved
+                continue
             valid, value = self._validate(path)
             if not valid:
                 ok = False
@@ -987,6 +1352,7 @@ class SettingsWindow:
         self.show_banner("ok", "Applying...")
 
         def work() -> None:
+            deferred: list[str] = []
             try:
                 applied, restart = app.apply_config(new)
                 deferred = list(getattr(app, "deferred", []))
@@ -999,13 +1365,17 @@ class SettingsWindow:
             pending = restart or (list(app.restart_pending()) if hasattr(app, "restart_pending") else [])
             if pending and not restart:
                 kind, text = "warn", text + " " + restart_banner(pending)
-            ui.post(lambda: self._show_result(kind, prefix + text, bool(pending)))
+            loading = getattr(app, "llm_state", ("idle",))[0] in ("pending", "loading")
+            if loading and not deferred and not pending:
+                kind, text = "ok", "Saved. Loading the language model (this can take a minute)..."
+            ui.post(lambda: self._show_result(kind, prefix + text, bool(pending), loading))
 
         threading.Thread(target=work, daemon=True, name="apply-settings").start()
 
-    def _show_result(self, kind: str, text: str, restart_button: bool) -> None:
+    def _show_result(self, kind: str, text: str, restart_button: bool, loading: bool = False) -> None:
         if not self.alive():
             return
+        self._llm_watch = loading
         self._refresh_buttons()
         self.show_banner("warn" if restart_button and kind == "ok" else kind, text, restart_button)
 

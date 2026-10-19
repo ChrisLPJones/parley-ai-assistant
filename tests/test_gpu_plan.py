@@ -153,5 +153,41 @@ class FallbackTests(unittest.TestCase):
                 llama_server.start(LlmConfig(), tmp)
 
 
+class StopHandleTests(unittest.TestCase):
+    """start() returns a URL that llama_server.stop() can later shut down (used by a language model reload)."""
+
+    def start(self, proc):
+        tmp = Path(__import__("tempfile").mkdtemp(prefix="parley_test_gpuplan_"))
+        with mock.patch.object(llama_server, "resolve_runtime", return_value="cpu"),                 mock.patch.object(llama_server, "ensure_runtime", return_value=tmp / "x"),                 mock.patch.object(llama_server, "ensure_model", return_value=tmp / "m.gguf"),                 mock.patch.object(llama_server, "_launch", return_value=(proc, "http://127.0.0.1:5")),                 mock.patch.object(llama_server, "_wait_ready"):
+            url, _ = llama_server.start(LlmConfig(), tmp)
+        return url
+
+    def test_stop_terminates_the_server_that_start_returned_once(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        url = self.start(proc)
+        self.assertTrue(llama_server.stop(url))
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once()
+        self.assertFalse(llama_server.stop(url))  # unknown now: nothing happens twice
+        self.assertFalse(llama_server.stop("http://127.0.0.1:99/v1"))
+        self.assertFalse(llama_server.stop(None))
+
+    def test_a_server_that_ignores_terminate_is_killed(self):
+        import subprocess
+
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = subprocess.TimeoutExpired("llama-server", 10)
+        self.assertTrue(llama_server.stop(self.start(proc)))
+        proc.kill.assert_called_once()
+
+    def test_an_already_exited_server_is_not_touched(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        self.assertFalse(llama_server.stop(self.start(proc)))
+        proc.terminate.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

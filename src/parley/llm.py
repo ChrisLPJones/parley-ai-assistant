@@ -29,6 +29,11 @@ class Chat:
         self.history: list[dict] = []
         self.last_used = 0.0
 
+    def rebind(self, cfg: LlmConfig) -> None:
+        """Read live settings from `cfg` from now on (the app's shared LlmConfig, after a reload built this chat from a copy)."""
+        self.cfg = cfg
+        self.provider.cfg = cfg
+
     def warm_up(self) -> None:
         start = time.perf_counter()
         self.provider.warm_up()
@@ -147,8 +152,8 @@ class OpenAICompatibleProvider:
             detail = r.json().get("error", {}).get("message") or r.text
         except (ValueError, AttributeError):
             detail = r.text
-        if r.status_code == 401:
-            raise SystemExit(f"{'OpenAI' if self.cloud else 'The server'} rejected the API key: {detail}")
+        if r.status_code == 401:  # the provider's detail text can quote part of the key, so it is not repeated
+            raise SystemExit(f"{'OpenAI' if self.cloud else 'The server'} rejected the API key.")
         if r.status_code == 404 and self.cloud:
             raise SystemExit(f"OpenAI model {self.model!r} isn't available ({detail}). Set llm.model in config.toml.")
         raise RuntimeError(f"HTTP {r.status_code} from {self.client.base_url}: {detail}")

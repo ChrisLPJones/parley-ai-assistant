@@ -116,7 +116,8 @@ class ModelsViewTests(unittest.TestCase):
         m = self.cat["llm-small"]
         self.assertEqual(mv.status_text(m, self.st(), True), "In use")
         self.assertEqual(mv.status_text(m, self.st(), False, "unsaved"), "Chosen (press Save)")
-        self.assertEqual(mv.status_text(m, self.st(), False, "saved"), "Chosen (restart Parley)")
+        self.assertEqual(mv.status_text(m, self.st(), False, "saved"), "Chosen (switching)")  # reloads live
+        self.assertEqual(mv.status_text(self.cat["stt-small.en"], self.st(), False, "saved"), "Chosen (restart Parley)")
         self.assertEqual(mv.status_text(m, self.st("not_installed"), False), "Not installed")
         self.assertEqual(mv.status_text(m, self.st("downloading", m.total_bytes // 2), False), "Downloading 50%")
         self.assertTrue(mv.status_text(m, self.st("partial", 5 * 1024**2), False).startswith("Partly"))
@@ -155,7 +156,7 @@ class ModelsViewTests(unittest.TestCase):
 
     def test_every_kind_has_a_restart_note_and_unchecked_voices_say_so(self):
         for kind, _title in mv.GROUPS:
-            self.assertIn("restarting Parley", mv.RESTART_NOTES[kind])
+            self.assertIn("restarting Parley" if kind != "llm" else "switches when it is ready", mv.RESTART_NOTES[kind])
         self.assertIn("not checked", self.cat["tts-kokoro-fp16"].note)
         self.assertIn("not checked", self.cat["tts-kokoro-int8"].note)
         self.assertNotIn("not checked", self.cat["tts-kokoro"].note)
@@ -592,7 +593,7 @@ class ModelsPageTests(WindowCase):
         self.open_models(self.host_with())
         self.pick("llm-small")
         self.assertTrue(self.btns()["use"])
-        self.assertIn("restarting Parley", self.note())
+        self.assertIn("switches when it is ready", self.note())
         self.on_ui(self.win._model_use)
         self.assertEqual(self.row("llm-small")[2], "Chosen (press Save)")
         self.assertNotIn("llm", self.cfg_path.read_text("utf-8"))  # nothing is written before Save
@@ -600,11 +601,11 @@ class ModelsPageTests(WindowCase):
         self.assertTrue(ok)
         self.assertEqual(changes, {"llm.preset": "small"})  # the empty repo / file / path already match config.toml
         self.on_ui(self.win.save)
-        self.wait_banner("Saved. 1 setting needs a restart")
+        self.wait_banner("Saved. Loading the language model")  # llm.preset reloads live now (the stub takes 1.5 s)
         out = self.cfg_path.read_text("utf-8")
         self.assertIn('preset = "small"', out)
         self.assertIn("# my favourite", out)
-        self.assertEqual(self.row("llm-small")[2], "Chosen (restart Parley)")
+        self.assertEqual(self.row("llm-small")[2], "Chosen (switching)")
         self.assertEqual(self.row("llm-tiny")[2], "In use")  # still what is running
 
     def test_use_warns_that_it_replaces_a_custom_model_only_when_there_is_one(self):
@@ -618,7 +619,7 @@ class ModelsPageTests(WindowCase):
             self.open_models(host)
             self.pick("llm-small")
             self.assertIn(mv.OWN_REPLACE_NOTE, self.note())
-            self.assertIn("restarting Parley", self.note())
+            self.assertIn("switches when it is ready", self.note())
 
     def test_use_replaces_a_custom_model(self):
         self.cfg_path.write_text('[llm]\nmodel_repo = "someone/their-model-GGUF"\nmodel_file = "x.gguf"\n', "utf-8")
@@ -832,6 +833,448 @@ class SecretTests(WindowCase):
         self.assertIn(SECRET, self.cfg_path.read_text("utf-8"))  # Save left the file as it was (the migration owns that line)
 
 
+KEY = "sk-ant-" "api03-TESTKEY0123456789abcdef"
+KEY2 = "TESTKEY-not-a-real-secret-ZZZZ0123456789"
+
+
+def widget_dump(win) -> str:
+    """Every text, value list and variable of every widget, the field values and the config objects (UI thread)."""
+    out: list[str] = []
+
+    def walk(w):
+        for opt in ("text", "textvariable", "values"):
+            try:
+                out.append(str(w.cget(opt)))
+            except Exception:
+                pass
+        try:
+            out.append(str(w.tk.globalgetvar(str(w.cget("textvariable")))))
+        except Exception:
+            pass
+        try:
+            out.append(str(w.get("1.0", "end")))  # a Text widget
+        except Exception:
+            try:
+                out.append(str(w.get()))  # an Entry: what is typed in it right now
+            except Exception:
+                pass
+        for c in w.winfo_children():
+            walk(c)
+
+    walk(win.top)
+    out += [repr(f.to_value()) for f in win.fields.values()]
+    out += [str(win.base.llm), repr(win.base), win.banner.cget("text")]
+    return "\n".join(out)
+
+
+class LlmPageTests(WindowCase):
+    """The LLM page: backend fields, API keys through the credential store only, the cloud notice, live reload results."""
+
+    def setUp(self):
+        super().setUp()
+        self.records: list[str] = []
+
+        class Grab(logging.Handler):
+            def emit(inner, record):
+                self.records.append(record.getMessage() + (logging.Formatter().formatException(record.exc_info) if record.exc_info else ""))
+
+        handler = Grab(logging.DEBUG)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        old = root.level
+        root.setLevel(logging.DEBUG)
+        self.addCleanup(lambda: (root.removeHandler(handler), root.setLevel(old)))
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            patcher = mock.patch.dict(os.environ)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            os.environ.pop(var, None)
+
+    def open_llm(self, backend="anthropic", extra="", state=None, host=None):
+        self.cfg_path.write_text(f'# my notes\n[tts]\nspeed = 1.1  # fast\n[llm]\nbackend = "{backend}"\n{extra}', "utf-8")
+        self.host, _h, _ = ui_preview.build_host(state, home=self.home, page="llm")
+        self.app = self.host.app
+        self.keys = self.host.keys
+        self.win = ui.call(lambda: sw.SettingsWindow(ui.root(), host or self.host, "llm"))
+        return self.win
+
+    def key_row(self, backend="anthropic"):
+        return self.on_ui(lambda: self.win.keys[backend])
+
+    def type_key(self, text, backend="anthropic"):
+        def go():
+            e = self.win.keys[backend].entry
+            e.delete(0, "end")
+            e.insert(0, text)
+        self.on_ui(go)
+
+    def key_state(self, backend="anthropic"):
+        def go():
+            k = self.win.keys[backend]
+            return {"status": k.status.cget("text"), "msg": k.message.cget("text"), "entry": k.entry.get(), "save": k.save.cget("text"),
+                    "remove": not k.remove.instate(["disabled"]), "test": not k.test.instate(["disabled"]), "show": k.entry.cget("show")}
+        return self.on_ui(go)
+
+    def wait_msg(self, startswith, backend="anthropic", timeout=5):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.key_state(backend)["msg"].startswith(startswith):
+                return
+            time.sleep(0.05)
+        self.fail(f"key message never started with {startswith!r}: {self.key_state(backend)['msg']!r}")
+
+    def assert_no_key_anywhere(self, *keys):
+        dump = self.on_ui(lambda: widget_dump(self.win))
+        for key in keys:
+            self.assertNotIn(key, dump)
+            self.assertFalse([r for r in self.records if key in r], "a log record holds the key")
+            self.assertNotIn(key, self.cfg_path.read_text("utf-8"))
+            for f in self.home.rglob("*"):
+                if f.is_file() and f.stat().st_size < 1_000_000:
+                    self.assertNotIn(key.encode(), f.read_bytes(), f.name)
+
+    # -- the page itself
+    def test_page_is_in_the_navigation_after_models(self):
+        self.open_llm()
+        self.assertEqual([k for k, _t in sw.PAGES][-2:], ["models", "llm"])
+        self.assertEqual(self.on_ui(lambda: self.win.page), "llm")
+
+    def test_fields_come_from_config_and_the_key_is_not_one_of_them(self):
+        self.open_llm("openai", 'model = "gpt-test"\nbase_url = "https://proxy.example.com/v1"\n')
+        values = self.on_ui(lambda: {p: f.to_value() for p, f in self.win.fields.items()})
+        self.assertEqual(values["llm.backend"], "openai")
+        self.assertEqual(values["llm.model"], "gpt-test")
+        self.assertEqual(values["llm.base_url"], "https://proxy.example.com/v1")
+        self.assertEqual(values["llm.system_prompt"], sw.config.DEFAULT_SYSTEM_PROMPT)
+        self.assertNotIn("llm.api_key", values)
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertEqual((changes, ok), ({}, True))
+
+    def test_every_listed_backend_is_a_real_backend_and_nothing_is_duplicated_from_other_pages(self):
+        self.assertEqual(set(sw.BACKEND_LABELS), set(S.BACKENDS))
+        self.assertTrue(set(sw.LLM_BACKENDS) <= set(S.BY_PATH))
+        self.open_llm()
+        on_llm = {p for p in self.on_ui(lambda: set(self.win.fields)) if p.startswith(("llm.", "tools."))}
+        self.assertFalse(on_llm & set((*sw.GENERAL_FIELDS, *sw.VOICE_FIELDS)))  # nothing is on two pages
+        self.assertFalse([p for p in (*sw.GENERAL_FIELDS, *sw.VOICE_FIELDS) if p.startswith(("llm.", "tools."))])
+        self.assertIn("tools.enabled", on_llm)
+
+    def test_settings_of_other_backends_are_hidden_and_not_checked(self):
+        self.open_llm("anthropic")
+
+        def go():
+            self.win.fields["llm.num_ctx"].widgets[0].delete(0, "end")  # a builtin / ollama setting
+            self.win.fields["llm.num_ctx"].widgets[0].insert(0, "abc")
+            return (self.win.fields["llm.num_ctx"].row.winfo_manager() == "", self.win.collect())
+        hidden, (changes, ok) = self.on_ui(go)
+        self.assertTrue(hidden)
+        self.assertTrue(ok)
+        self.assertNotIn("llm.num_ctx", changes)
+
+        def switch():
+            self.win.backend_var.set(sw.BACKEND_LABELS["builtin"])
+            self.win._backend_changed()
+            return self.win.collect(), dict(self.win.errors)
+        (changes, ok), errors = self.on_ui(switch)
+        self.assertFalse(ok)  # now it is visible, so it is checked
+        self.assertIn("llm.num_ctx", errors)
+        self.assertTrue(self.save_disabled())
+
+    def test_backend_rows_follow_the_selection(self):
+        self.open_llm("builtin")
+
+        def shown():
+            return {"key_anthropic": self.win.keys["anthropic"].frame.winfo_manager() != "",
+                    "key_openai": self.win.keys["openai"].frame.winfo_manager() != "",
+                    "model": self.win.fields["llm.model"].row.winfo_manager() != "",
+                    "effort": self.win.fields["llm.effort"].row.winfo_manager() != "",
+                    "base_url": self.win.fields["llm.base_url"].row.winfo_manager() != ""}
+
+        def pick(backend):
+            self.win.backend_var.set(sw.BACKEND_LABELS[backend])
+            self.win._backend_changed()
+            return shown()
+        self.assertEqual(self.on_ui(shown), {"key_anthropic": False, "key_openai": False, "model": False, "effort": False, "base_url": False})
+        self.assertEqual(self.on_ui(lambda: pick("anthropic")), {"key_anthropic": True, "key_openai": False, "model": True, "effort": True, "base_url": False})
+        self.assertEqual(self.on_ui(lambda: pick("openai")), {"key_anthropic": False, "key_openai": True, "model": True, "effort": False, "base_url": True})
+        self.assertEqual(self.on_ui(lambda: pick("server")), {"key_anthropic": False, "key_openai": False, "model": True, "effort": False, "base_url": True})
+
+    def test_save_writes_only_the_changed_keys_keeps_comments_and_reloads_live(self):
+        self.open_llm("anthropic")
+
+        def go():
+            self.win.fields["llm.model"].widgets[0].insert(0, "claude-test")
+            self.win.fields["llm.history_turns"].widgets[0].delete(0, "end")
+            self.win.fields["llm.history_turns"].widgets[0].insert(0, "7")
+        self.on_ui(go)
+        changes, ok = self.on_ui(self.win.collect)
+        self.assertEqual((changes, ok), ({"llm.model": "claude-test", "llm.history_turns": 7}, True))
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. Loading the language model")
+        out = self.cfg_path.read_text("utf-8")
+        self.assertIn('model = "claude-test"', out)
+        self.assertIn("history_turns = 7", out)
+        self.assertIn("# my notes", out)
+        self.assertIn("# fast", out)
+        self.assertEqual(self.wait_banner("Saved. The new language model is ready", timeout=6)[1], "ok")
+        self.assertEqual(self.app.llm_state[0], "done")
+
+    def test_a_failed_reload_is_a_plain_sentence_and_the_old_model_stays(self):
+        self.open_llm("anthropic", state="llm-error")
+        self.on_ui(lambda: self.win.fields["llm.model"].widgets[0].insert(0, "claude-test"))
+        self.on_ui(self.win.save)
+        text, kind = self.wait_banner("Saved, but the new language model could not start", timeout=6)
+        self.assertEqual(kind, "error")
+        self.assertIn("still using the previous one", text)
+        self.assertTrue(self.on_ui(lambda: self.win.restart_btn.winfo_manager() != ""))
+
+    def test_a_busy_app_says_the_change_waits_for_the_answer(self):
+        self.open_llm("anthropic")
+        self.app.apply_config = lambda new: ([], [])
+        self.app.deferred = ["llm.model"]
+        self.on_ui(lambda: self.win.fields["llm.model"].widgets[0].insert(0, "claude-test"))
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. 1 setting will apply after this answer")
+
+    # -- the cloud notice and the address warning
+    def test_cloud_backends_show_a_one_line_notice_that_text_goes_to_the_provider(self):
+        self.open_llm("builtin")
+        shown = lambda: self.on_ui(lambda: (self.win.llm_notice.cget("text"), self.win.llm_notice.winfo_manager() != ""))  # noqa: E731
+        self.assertEqual(shown(), ("", False))
+        for backend, provider in (("anthropic", "Anthropic"), ("openai", "OpenAI")):
+            self.on_ui(lambda b=backend: (self.win.backend_var.set(sw.BACKEND_LABELS[b]), self.win._backend_changed()))
+            text, visible = shown()
+            self.assertTrue(visible)
+            self.assertIn(f"sent to {provider}", text)
+            self.assertIn("tools", text)
+            self.assertIn("turned into text on this computer", text)
+        for backend in ("ollama", "server", "builtin"):
+            self.on_ui(lambda b=backend: (self.win.backend_var.set(sw.BACKEND_LABELS[b]), self.win._backend_changed()))
+            self.assertEqual(shown(), ("", False))
+
+    def test_local_backends_show_a_muted_example_and_the_page_shows_no_addresses(self):
+        import re
+        self.open_llm("builtin")
+
+        def pick(b):
+            self.win.backend_var.set(sw.BACKEND_LABELS[b])
+            self.win._backend_changed()
+            return self.win.llm_example.cget("text"), self.win.llm_example.winfo_manager() != ""
+        self.assertIn("Qwen3.5-9B-GGUF", self.on_ui(lambda: pick("builtin"))[0])
+        self.assertEqual(self.on_ui(lambda: pick("ollama")), ("Example model name: qwen3:4b", True))
+        self.assertTrue(self.on_ui(lambda: pick("server"))[1])
+        self.assertEqual(self.on_ui(lambda: pick("openai")), ("", False))
+        self.assertEqual(self.on_ui(lambda: pick("anthropic")), ("", False))
+        self.assertNotIn("llm.model", self.on_ui(lambda: self.win.collect())[0])  # examples are never values
+        for b in ("builtin", "ollama", "server", "openai"):
+            self.on_ui(lambda b=b: pick(b))
+            text = self.on_ui(lambda: widget_dump(self.win))
+            self.assertFalse(re.search(r"\d+\.\d+\.\d+\.\d+|localhost|https?://|:\d{4,5}", text), b)
+
+    def test_http_address_warning(self):
+        self.open_llm("openai")
+
+        def url(text, backend=None):
+            def go():
+                if backend:
+                    self.win.backend_var.set(sw.BACKEND_LABELS[backend])
+                    self.win._backend_changed()
+                e = self.win.fields["llm.base_url"].widgets[0]
+                e.delete(0, "end")
+                e.insert(0, text)
+                return self.win.url_warning.cget("text"), self.win.url_warning.winfo_manager() != ""
+            return self.on_ui(go)
+        text, visible = url("http://api.openai.com/v1")  # the old check stayed silent for the provider's own host name
+        self.assertTrue(visible)
+        self.assertIn("unencrypted", text)
+        self.assertEqual(url("https://api.openai.com/v1"), ("", False))
+        self.assertEqual(url(""), ("", False))
+        text, visible = url("https://proxy.example.com/v1")
+        self.assertTrue(visible)
+        self.assertIn("another address", text)
+        self.assertNotIn("proxy.example.com", text)  # the page never spells out the host
+        self.assertEqual(url("http://127.0.0.1:8080/v1", "server"), ("", False))
+        self.assertTrue(url("http://192.168.1.20:11434", "ollama")[1])
+        self.assertEqual(url("https://my.server.example/v1", "server"), ("", False))  # a custom host is the point of "server"
+
+    # -- keys
+    def test_not_saved_status_and_buttons(self):
+        self.open_llm("anthropic")
+        st = self.key_state()
+        self.assertEqual(st["status"], "No key saved.")
+        self.assertEqual((st["save"], st["remove"], st["test"]), ("Save key", False, False))
+        self.assertEqual(st["show"], "*")  # masked
+        self.assertEqual(st["entry"], "")
+
+    def test_saved_status_is_shown_without_the_key_and_the_entry_is_never_prefilled(self):
+        self.open_llm("anthropic", state="key-saved")
+        st = self.key_state()
+        self.assertEqual(st["status"], "Saved in the Windows credential store.")
+        self.assertEqual((st["save"], st["remove"], st["test"], st["entry"]), ("Replace key", True, True, ""))
+        os.environ["ANTHROPIC_API_KEY"] = KEY2  # not even an environment key is put into the field
+        self.on_ui(self.win.close)
+        self.open_llm("anthropic", state="key-saved")
+        st = self.key_state()
+        self.assertIn("ANTHROPIC_API_KEY in the environment is ignored", st["status"])
+        self.assertEqual(st["entry"], "")
+        self.assert_no_key_anywhere(KEY2, "PREVIEW-not-a-real-key-0123456789")
+
+    def test_environment_key_is_reported_by_name_only(self):
+        os.environ["OPENAI_API_KEY"] = KEY2
+        self.open_llm("openai")
+        st = self.key_state("openai")
+        self.assertIn("OPENAI_API_KEY from the environment", st["status"])
+        self.assertTrue(st["test"])
+        self.assertFalse(st["remove"])
+        self.assert_no_key_anywhere(KEY2)
+
+    def test_save_key_goes_to_the_credential_store_only_and_clears_the_entry(self):
+        self.open_llm("builtin")  # not the running backend: nothing to reload
+        before = self.cfg_path.read_bytes()
+        self.on_ui(lambda: (self.win.backend_var.set(sw.BACKEND_LABELS["anthropic"]), self.win._backend_changed()))
+        self.type_key(KEY)
+        self.on_ui(lambda: self.win._key_save("anthropic"))
+        st = self.key_state()
+        self.assertEqual(st["entry"], "")  # cleared
+        self.assertEqual(st["msg"], "Key saved.")
+        self.assertEqual((st["save"], st["remove"], st["test"]), ("Replace key", True, True))
+        self.assertEqual(self.keys.get("anthropic"), KEY)
+        self.assertEqual(self.cfg_path.read_bytes(), before)  # config.toml never saw it
+        self.assertEqual(self.app.keys_changed, [])
+        self.assert_no_key_anywhere(KEY)
+
+    def test_save_key_for_the_running_backend_rebuilds_the_chat(self):
+        self.open_llm("anthropic")
+        self.app.cfg.llm.backend = "anthropic"
+        self.type_key(KEY)
+        self.on_ui(lambda: self.win._key_save("anthropic"))
+        self.wait_msg("Key saved. Loading it now")
+        end = time.monotonic() + 3
+        while not self.app.keys_changed and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertEqual(self.app.keys_changed, ["anthropic"])
+        self.wait_banner("Saved. The new language model is ready", timeout=6)
+        self.assert_no_key_anywhere(KEY)
+
+    def test_replace_overwrites_and_a_failed_save_keeps_the_old_key(self):
+        self.open_llm("anthropic", state="key-saved")
+        old = self.keys.get("anthropic")
+        self.keys.backend.fail = True
+        self.type_key(KEY2)
+        self.on_ui(lambda: self.win._key_save("anthropic"))
+        st = self.key_state()
+        self.assertEqual(st["entry"], "")  # cleared even when it failed
+        self.assertTrue(st["msg"].startswith("The Windows credential store failed"))
+        self.assertEqual(self.keys.get("anthropic"), old)
+        self.keys.backend.fail = False
+        self.type_key(KEY2)
+        self.on_ui(lambda: self.win._key_save("anthropic"))
+        self.assertEqual(self.keys.get("anthropic"), KEY2)
+        self.assert_no_key_anywhere(KEY2, old)
+
+    def test_bad_input_is_refused_without_echoing_it(self):
+        self.open_llm("anthropic")
+        for text, expect in (("", "Type or paste the key first."), ("has a space inside", "doesn't look like an API key"),
+                             ("café-key-12345", "doesn't look like an API key")):
+            self.type_key(text)
+            self.on_ui(lambda: self.win._key_save("anthropic"))
+            st = self.key_state()
+            self.assertIn(expect, st["msg"])
+            self.assertEqual(st["entry"], "")
+            self.assertNotIn("inside", st["msg"].replace("doesn't look like an API key", ""))
+        self.assertEqual(self.keys.backend.items, {})
+
+    def test_remove_asks_first_and_clears_the_stored_key(self):
+        self.open_llm("anthropic", state="key-saved")
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=False) as ask:
+            self.on_ui(lambda: self.win._key_remove("anthropic"))
+        ask.assert_called_once()
+        self.assertTrue(self.keys.exists("anthropic"))
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=True):
+            self.on_ui(lambda: self.win._key_remove("anthropic"))
+        self.assertFalse(self.keys.exists("anthropic"))
+        st = self.key_state()
+        self.assertEqual((st["status"], st["save"], st["remove"], st["test"]), ("No key saved.", "Save key", False, False))
+        self.assertTrue(st["msg"].startswith("Key removed."))
+
+    def test_removing_the_key_of_the_running_backend_says_the_session_keeps_it(self):
+        self.open_llm("anthropic", state="key-saved")
+        self.app.cfg.llm.backend = "anthropic"
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=True):
+            self.on_ui(lambda: self.win._key_remove("anthropic"))
+        self.assertIn("until you restart", self.key_state()["msg"])
+
+    def test_test_key_is_user_triggered_and_shows_one_sentence(self):
+        calls = []
+
+        def check(backend, key):
+            calls.append((backend, key))
+            return "The provider accepted this key."
+        self.open_llm("anthropic", state="key-saved")
+        self.host.key_check = check
+        time.sleep(0.3)
+        self.assertEqual(calls, [])  # nothing is sent until the button is pressed
+        self.on_ui(lambda: self.win._key_test("anthropic"))
+        self.wait_msg("The provider accepted this key.")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "anthropic")
+        self.assertEqual(calls[0][1], "PREVIEW-not-a-real-key-0123456789")
+        self.assert_no_key_anywhere("PREVIEW-not-a-real-key-0123456789")
+
+    def test_a_crashing_key_check_gives_a_plain_sentence(self):
+        def boom(backend, key):
+            raise RuntimeError(f"failed with {key}")
+        self.open_llm("anthropic", state="key-saved")
+        self.host.key_check = boom
+        self.on_ui(lambda: self.win._key_test("anthropic"))
+        self.wait_msg("The key could not be tested.")
+        self.assert_no_key_anywhere("PREVIEW-not-a-real-key-0123456789")
+
+    def test_without_a_credential_store_the_page_says_so_and_nothing_can_be_saved(self):
+        self.open_llm("anthropic")
+        self.host.keys = None
+        self.on_ui(lambda: self.win._key_refresh("anthropic"))
+        st = self.key_state()
+        self.assertIn("needs the Windows credential store", st["status"])
+        self.assertIn("ANTHROPIC_API_KEY", st["status"])
+        self.assertEqual((st["remove"], st["test"]), (False, False))
+        self.assertTrue(self.on_ui(lambda: self.win.keys["anthropic"].save.instate(["disabled"])))
+
+    def test_save_of_the_page_writes_no_key_even_with_one_typed_and_a_legacy_key_in_the_file(self):
+        self.open_llm("anthropic", f'api_key = "{KEY2}"\n')
+        st = self.key_state()
+        self.assertIn("still in config.toml", st["status"])
+        self.type_key(KEY)  # typed, not saved: Save must ignore it
+        self.on_ui(lambda: self.win.fields["llm.model"].widgets[0].insert(0, "claude-test"))
+        changes, _ok = self.on_ui(self.win.collect)
+        self.assertEqual(changes, {"llm.model": "claude-test"})
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved. Loading")
+        out = self.cfg_path.read_text("utf-8")
+        self.assertNotIn(KEY, out)
+        self.assertIn(KEY2, out)  # Save left the legacy line to the startup migration
+        self.assertIn("# my notes", out)
+        self.assertFalse(self.keys.exists("anthropic"))  # and did not route the typed key anywhere
+        self.assertFalse([r for r in self.records if KEY in r or KEY2 in r])
+
+    def test_no_key_in_any_widget_log_or_file_through_a_whole_session(self):
+        self.open_llm("anthropic")
+        self.app.cfg.llm.backend = "anthropic"
+        self.type_key(KEY)
+        self.on_ui(lambda: self.win._key_save("anthropic"))
+        self.wait_msg("Key saved. Loading it now")
+        self.host.key_check = lambda b, k: "The provider rejected this key."
+        self.on_ui(lambda: self.win._key_test("anthropic"))
+        self.wait_msg("The provider rejected this key.")
+        self.on_ui(lambda: self.win.fields["llm.model"].widgets[0].insert(0, "claude-test"))
+        self.on_ui(self.win.save)
+        self.wait_banner("Saved")
+        with mock.patch.object(sw.messagebox, "askyesno", return_value=True):
+            self.on_ui(lambda: self.win._key_remove("anthropic"))
+        self.assert_no_key_anywhere(KEY)
+        self.assertNotIn(KEY, "\n".join(self.records))
+
+
 class TrayWiringTests(unittest.TestCase):
     """TrayApp.open_settings -> a real window; shutdown closes it (the `--tray --smoke` path, with a fake tray)."""
 
@@ -965,6 +1408,26 @@ class PreviewSmokeTests(unittest.TestCase):
         if r.returncode == 1 and "could not start" in r.stderr:
             self.skipTest("no display for Tk")
         self.assertEqual(r.returncode, 0, r.stderr[-500:])
+
+    def test_ui_preview_llm_page_opens_in_each_state(self):
+        for state in ("key-saved", "llm-error"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
+                env = {**os.environ, "PARLEY_HOME": str(Path(tmp) / "parley_test_ui_smoke")}
+                r = subprocess.run([sys.executable, "-m", "parley.ui_preview", "--smoke", "--page", "llm", "--state", state],
+                                   capture_output=True, text=True, timeout=120, env=env, cwd=ROOT)
+            if r.returncode == 1 and "could not start" in r.stderr:
+                self.skipTest("no display for Tk")
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+
+    def test_ui_preview_keys_live_in_memory_never_in_the_windows_credential_store(self):
+        with tempfile.TemporaryDirectory(prefix="parley_test_settingswin_") as tmp:
+            home = Path(tmp) / "parley_test_ui_keys"
+            home.mkdir()
+            with mock.patch.dict(os.environ, {"PARLEY_HOME": str(home)}):
+                host, _home, _created = ui_preview.build_host("key-saved", home=home, page="llm")
+        self.assertIsInstance(host.keys.backend, ui_preview.FakeKeyBackend)
+        self.assertTrue(host.keys.exists("anthropic"))
+        self.assertFalse(host.keys.exists("openai"))
 
     def test_ui_preview_never_uses_the_real_home(self):
         real = os.path.join(os.environ.get("LOCALAPPDATA", "x"), "parley")

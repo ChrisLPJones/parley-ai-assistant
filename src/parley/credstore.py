@@ -39,6 +39,12 @@ class Backend(Protocol):
     def delete(self, target: str) -> bool: ...
 
 
+def _code(e: Exception):
+    """First argument of a pywin32 error (the Windows error code), or None when there are no arguments."""
+    args = getattr(e, "args", None)
+    return args[0] if args else None
+
+
 class WinBackend:
     """win32cred; every pywin32 error becomes a CredentialError with only the Windows error code."""
 
@@ -47,14 +53,14 @@ class WinBackend:
         self._w = win32cred
 
     def _fail(self, op: str, e: Exception) -> CredentialError:
-        code = e.args[0] if getattr(e, "args", None) and isinstance(e.args[0], int) else "?"
+        code = _code(e) if isinstance(_code(e), int) else "?"
         return CredentialError(f"The Windows credential store failed to {op} (error {code}).")
 
     def read(self, target):
         try:
             cred = self._w.CredRead(target, self._w.CRED_TYPE_GENERIC, 0)
         except Exception as e:
-            if getattr(e, "args", (None,))[0] == _ERROR_NOT_FOUND:
+            if _code(e) == _ERROR_NOT_FOUND:
                 return None
             raise self._fail("read a key", e) from None
         blob = bytes(cred.get("CredentialBlob") or b"")  # pywin32 stores a str as UTF-16LE
@@ -77,7 +83,7 @@ class WinBackend:
             self._w.CredDelete(target, self._w.CRED_TYPE_GENERIC, 0)
             return True
         except Exception as e:
-            if getattr(e, "args", (None,))[0] == _ERROR_NOT_FOUND:
+            if _code(e) == _ERROR_NOT_FOUND:
                 return False
             raise self._fail("delete a key", e) from None
 
@@ -201,23 +207,43 @@ def resolve_api_key(backend_name: str, cfg, store: CredStore | None = None) -> s
     return key
 
 
+def _is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def endpoint_warning(backend_name: str, base_url: str, loopback_ok: bool = False, host_check: bool = True,
+                     show_host: bool = True) -> str | None:
+    """A plain sentence when a key would travel somewhere other than the provider's own https address, else None.
+    Used for the log and for the Settings page (host only, never a key). `host_check=False` keeps only the http:// warning
+    (Ollama and your own server are expected to be somewhere else)."""
+    try:
+        u = urlparse(base_url)
+        host, scheme = u.hostname or "", u.scheme
+    except ValueError:
+        host, scheme = "", ""
+    if not host:
+        return None
+    loopback = _is_loopback(host)
+    if scheme == "http" and not loopback:
+        where = f"to {host}" if show_host else "over the network"
+        return (f"This address starts with http://, so what you say and any API key travel unencrypted {where}. "
+                "Use https:// unless it is on your own network.")
+    if not host_check or host == DEFAULT_HOSTS.get(backend_name) or (loopback_ok and loopback):
+        return None
+    where = host if show_host else "another address"
+    return f"The {backend_name} API key will be sent to {where}, not the provider's own address."
+
+
 def warn_if_custom_endpoint(backend_name: str, base_url: str, loopback_ok: bool = False) -> None:
     """Log (host only) when a key is about to be sent somewhere other than the provider's own endpoint."""
-    try:
-        host = urlparse(base_url).hostname or ""
-    except ValueError:
-        host = ""
-    if not host or host == DEFAULT_HOSTS.get(backend_name):
-        return
-    if loopback_ok and host in ("127.0.0.1", "localhost", "::1"):
-        return
-    log.warning("The %s API key will be sent to %s, not the provider's own address", backend_name, host)
+    if (text := endpoint_warning(backend_name, base_url, loopback_ok)) is not None:
+        log.warning("%s", text)
 
 
 # -- keeping keys out of logs ----------------------------------------------------------------------------------
 
 _secrets: dict[str, None] = {}  # (a dict: this module defines its own set())
-_KEY_SHAPE = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,}|x-api-key['\"]?\s*[:=]\s*['\"]?[^\s'\",}]+)", re.I)
+_KEY_SHAPE = re.compile(r"((?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,}|x-api-key['\"]?\s*[:=]\s*['\"]?[^\s'\",}]+)", re.I)
 
 
 def register_secret(value: str) -> None:
@@ -341,7 +367,10 @@ def _migrate(path: Path, store: CredStore) -> str:
     except Exception as e:
         if wrote:
             try:
-                store.delete(backend)  # nothing else held this entry, so undo the half step
+                # Undo the half step only while config.toml still holds the key. Another starting instance may have removed
+                # the line already; then the store entry is the only copy left and must stay.
+                if _legacy_key(path.read_bytes().decode("utf-8")) == key:
+                    store.delete(backend)
             except Exception:
                 pass
         _warn_once("failed", "Could not move llm.api_key into the credential store (%s); %s was left as it was",
@@ -366,6 +395,58 @@ def _bak_has_key(bak: Path) -> bool:
         return False
 
 
+# -- saving a key (Settings page and command line) ------------------------------------------------------------------
+
+def replace_key(store: CredStore, backend_name: str, key: str) -> None:
+    """Save `key`, read it back and compare. If anything goes wrong the previous key (or the absence of one) is
+    restored, so a failed Replace never loses the old key and never leaves a wrong entry. Raises CredentialError
+    (a short sentence, never the key)."""
+    old = store.get(backend_name)
+    register_secret(key)
+    try:
+        store.set(backend_name, key)
+        if store.get(backend_name) != key:
+            raise CredentialError("The saved key did not read back correctly.")
+    except CredentialError:
+        try:
+            if old is None:
+                store.delete(backend_name)
+            else:
+                store.set(backend_name, old)
+        except CredentialError:
+            log.warning("Could not restore the previous %s key after a failed save", backend_name)
+        raise
+
+
+# -- testing a key (user-triggered only) ---------------------------------------------------------------------------
+
+KEY_CHECK_URLS = {"anthropic": "https://api.anthropic.com/v1/models", "openai": "https://api.openai.com/v1/models"}
+
+
+def check_key(backend_name: str, key: str, get=None) -> str:
+    """One GET to the provider's OWN host (the fixed url above, never llm.base_url), no redirects, no proxy or
+    environment settings. Returns a plain sentence; the key is never logged or returned."""
+    url = KEY_CHECK_URLS.get(backend_name)
+    if url is None or not key:
+        return "There is no key to test."
+    import httpx
+
+    register_secret(key)
+    headers = ({"x-api-key": key, "anthropic-version": "2023-06-01"} if backend_name == "anthropic"
+               else {"Authorization": f"Bearer {key}"})
+    host = DEFAULT_HOSTS[backend_name]
+    try:
+        status = (get or httpx.get)(url, headers=headers, timeout=10, follow_redirects=False, trust_env=False).status_code
+    except httpx.HTTPError:
+        return f"Couldn't reach {host}. Check the internet connection."
+    log.info("Key test for %s: HTTP %d", backend_name, status)
+    if status == 200:
+        return "The provider accepted this key."
+    if status in (401, 403):
+        return "The provider rejected this key."
+    return f"The provider answered with an error (HTTP {status}); the key may still be fine."
+
+
 # -- command line --------------------------------------------------------------------------------------------------
 
 UnavailableMessage = "Saving keys needs the Windows credential store, which is not available here. Use the environment variable instead."
@@ -386,11 +467,8 @@ def cli_set_key(backend_name: str, store: CredStore | None = None, out=None, err
     if not check_key_shape(key):
         print("That doesn't look like an API key (letters and digits only, no spaces); nothing saved.", file=err)
         return 1
-    register_secret(key)
     try:
-        store.set(backend_name, key)
-        if store.get(backend_name) != key:
-            raise CredentialError("The saved key did not read back correctly.")
+        replace_key(store, backend_name, key)
     except CredentialError as e:
         print(f"Not saved: {e}", file=err)
         return 1

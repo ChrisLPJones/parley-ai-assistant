@@ -20,8 +20,8 @@ beam_size = 1
 
 [llm]
 # builtin   - Parley downloads and runs a small local model itself (default; private and offline)
-# anthropic - Claude via the Anthropic API: parley --set-key anthropic (or set ANTHROPIC_API_KEY)
-# openai    - OpenAI API: parley --set-key openai (or set OPENAI_API_KEY)
+# anthropic - Claude via the Anthropic API: save the key on Settings > LLM or with parley --set-key anthropic (or set ANTHROPIC_API_KEY)
+# openai    - OpenAI API: save the key on Settings > LLM or with parley --set-key openai (or set OPENAI_API_KEY)
 # ollama / server - a local server you already run (Ollama / any OpenAI-compatible server)
 backend = "builtin"
 

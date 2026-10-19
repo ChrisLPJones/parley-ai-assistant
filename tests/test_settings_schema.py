@@ -32,6 +32,12 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(ss.RESTART_PATHS, {"stt.model", "stt.device", "stt.compute_type", "stt.cpu_threads",
                                             "tts.device", "tts.model", "gpu.download_cuda"})
         self.assertEqual(ss.BY_PATH["updates.check"].apply, ss.NEXT_LAUNCH)
+        # the language model settings that Parley applies without a restart (a new llama-server, or only a new Chat)
+        self.assertEqual({s.path for s in ss.SETTINGS if s.apply == ss.RELOAD_LLM},
+                         {"llm.backend", "llm.preset", "llm.model_repo", "llm.model_file", "llm.model_path", "llm.runtime",
+                          "llm.gpu_layers", "llm.num_ctx", "llm.think"})
+        self.assertEqual({s.path for s in ss.SETTINGS if s.apply == ss.REBUILD_CHAT},
+                         {"llm.model", "llm.api_key", "llm.base_url", "tools.enabled", "tools.web_search"})
 
     def test_defaults_validate(self):
         cfg = config.Config()
