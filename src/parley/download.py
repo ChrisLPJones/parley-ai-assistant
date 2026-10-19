@@ -89,23 +89,44 @@ class DownloadError(Exception):
     """A verified download failed (wrong size or hash, or too much data)."""
 
 
-def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
-                      progress: Callable[[int, int], None] | None = None,
-                      cancel: threading.Event | None = None) -> Path:
-    """Stream `url` to `dest`, accepting it only if it is exactly `size` bytes with the given sha256.
+class DownloadTruncated(DownloadError):
+    """The body ended early but cleanly. A resumable download keeps its `.part` (nothing was proven wrong)."""
 
-    `open_stream(url)` is a context manager yielding a response (lets the caller control TLS and
-    redirects). Always starts fresh (no resume), aborts as soon as more than `size` bytes arrive,
-    and only moves the file into place after both checks pass; a bad download is deleted.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
-    digest, done = hashlib.sha256(), 0
-    try:
-        with open_stream(url) as r, open(part, "wb") as f:
+
+def _header(r, name: str) -> str:
+    headers = getattr(r, "headers", None)
+    return str(headers.get(name, "")) if headers is not None else ""
+
+
+def _fetch(open_stream, url: str, part: Path, offset: int, size: int, progress, cancel) -> str | None:
+    """Write the body to `part` (appending after `offset` bytes already there, which are hashed first) and return the
+    sha256 hex of the whole file. None means the server did not honour the Range request (nothing was changed)."""
+    digest = hashlib.sha256()
+    if offset:
+        with open(part, "rb") as f:
+            left = offset
+            while left:
+                chunk = f.read(min(1 << 20, left))
+                if not chunk:
+                    raise DownloadError("partial file is shorter than it should be")
+                digest.update(chunk)
+                left -= len(chunk)
+        ctx = open_stream(url, {"Range": f"bytes={offset}-"})
+    else:
+        part.unlink(missing_ok=True)  # a link left at this name must not be written through
+        ctx = open_stream(url)
+    with ctx as r:
+        if offset and (getattr(r, "status_code", None) != 206
+                       or not _header(r, "content-range").startswith(f"bytes {offset}-")):
+            return None
+        length = _header(r, "content-length")
+        if length.isdigit() and int(length) > size - offset:
+            raise DownloadError("download is larger than announced")
+        done = offset
+        with open(part, "ab" if offset else "wb") as f:
             for chunk in r.iter_bytes(1 << 20):
                 if cancel is not None and cancel.is_set():
-                    raise DownloadCancelled(dest.name)
+                    raise DownloadCancelled(part.name)
                 done += len(chunk)
                 if progress is not None:
                     _safe(progress, done, size)
@@ -113,13 +134,43 @@ def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
                     raise DownloadError("download is larger than announced")
                 digest.update(chunk)
                 f.write(chunk)
-        if done != size:
-            raise DownloadError("download is truncated")
-        if digest.hexdigest() != sha256:
+    if done != size:
+        raise DownloadTruncated("download is truncated")
+    return digest.hexdigest()
+
+
+def download_verified(open_stream, url: str, dest: Path, sha256: str, size: int,
+                      progress: Callable[[int, int], None] | None = None,
+                      cancel: threading.Event | None = None, resume: bool = False) -> Path:
+    """Stream `url` to `dest`, accepting it only if it is exactly `size` bytes with the given sha256.
+
+    `open_stream(url)` is a context manager yielding a response (lets the caller control TLS and
+    redirects). Aborts as soon as more than `size` bytes arrive (or `Content-Length` announces more), and only moves
+    the file into place after both checks pass; a bad download is deleted.
+
+    Default: always starts fresh. `resume=True` (used for the multi-GB models): an existing `.part` is re-hashed and
+    continued with `open_stream(url, {"Range": ...})`, but only if the server answers 206 with a matching
+    `Content-Range`; otherwise the download restarts from zero. The size and sha256 are always checked over the whole
+    file. With `resume`, a cancel, a network error or a clean short body keeps the `.part`; a size/hash failure deletes it.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        have = 0
+        if resume and part.is_file() and not part.is_symlink():
+            have = part.stat().st_size
+            if not 0 < have < size:
+                part.unlink(missing_ok=True)
+                have = 0
+        digest = _fetch(open_stream, url, part, have, size, progress, cancel) if have else None
+        if digest is None:
+            digest = _fetch(open_stream, url, part, 0, size, progress, cancel)
+        if digest != sha256:
             raise DownloadError("download does not match its sha256")
         part.replace(dest)
-    except BaseException:
-        part.unlink(missing_ok=True)
+    except BaseException as e:
+        if not (resume and (not isinstance(e, DownloadError) or isinstance(e, DownloadTruncated))):
+            part.unlink(missing_ok=True)
         raise
     return dest
 

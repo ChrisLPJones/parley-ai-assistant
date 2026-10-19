@@ -65,7 +65,7 @@ class LlmConfig:
     # openai:    OpenAI API (needs a saved key, see `parley --set-key`, or OPENAI_API_KEY)
     # ollama / server: a local server you already run (Ollama / any OpenAI-compatible server)
     backend: str = "builtin"
-    preset: str = "auto"  # builtin: auto (picked from your hardware) | small (Qwen3.5 4B) | tiny (Qwen3.5 2B)
+    preset: str = "auto"  # builtin: auto (picked from your hardware) | medium (Qwen3.5 9B) | small (Qwen3.5 4B) | tiny (Qwen3.5 2B)
     model_repo: str = ""  # builtin: any GGUF on Hugging Face instead of a preset, e.g. "unsloth/Qwen3.5-9B-GGUF"
     model_file: str = ""  #   ...and the file in that repo, e.g. "Qwen3.5-9B-Q4_K_M.gguf"
     model_path: str = ""  # builtin: or a GGUF file already on disk

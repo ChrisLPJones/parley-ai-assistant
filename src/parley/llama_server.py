@@ -61,8 +61,10 @@ ASSET_PINS: dict[str, tuple[str, int]] = {
 }
 
 # name: (Hugging Face repo, file, approx memory needed in GB incl. context). Kept small so Parley
-# runs on ordinary laptops; bigger GGUFs work via llm.model_repo / model_file.
+# runs on ordinary laptops; bigger GGUFs work via llm.model_repo / model_file. `medium` is for computers with a
+# strong GPU or plenty of memory; it is never picked automatically (pick_preset returns small or tiny).
 PRESETS = {
+    "medium": ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf", 7),
     "small": ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf", 4),
     "tiny": ("unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-Q4_K_M.gguf", 2),
 }
@@ -173,9 +175,11 @@ def check_model_names(repo: str, file: str) -> None:
         raise ValueError("a model file is a plain name ending in .gguf (letters, digits, '.', '_' and '-' only)")
 
 
-def ensure_model(cfg: LlmConfig, home: Path) -> Path:
+def resolve_model(cfg: LlmConfig, home: Path) -> tuple[Path, str | None, str | None]:
+    """(path of the model file, Hugging Face repo, file name) for this config, without downloading anything.
+    repo/file are None for `llm.model_path`. Raises SystemExit for a bad config."""
     if cfg.model_path:
-        return Path(cfg.model_path)
+        return Path(cfg.model_path), None, None
     if cfg.model_repo:
         repo, file = cfg.model_repo, cfg.model_file
         try:
@@ -187,14 +191,31 @@ def ensure_model(cfg: LlmConfig, home: Path) -> Path:
         if preset not in PRESETS:
             raise SystemExit(f"Unknown llm.preset {preset!r}; choose auto or one of {', '.join(PRESETS)}")
         repo, file, _ = PRESETS[preset]
-        log.info("LLM preset: %s (%s)", preset, file)
     base = home / "models" / "llm"
     dest = base / file
     if not dest.resolve().is_relative_to(base.resolve()):
         raise SystemExit("llm.model_file must stay inside the models folder.")
-    if not dest.exists():
-        log.info("Downloading %s from %s, first run only ...", file, repo)
-        download(f"https://huggingface.co/{repo}/resolve/main/{file}", dest)
+    return dest, repo, file
+
+
+def ensure_model(cfg: LlmConfig, home: Path) -> Path:
+    dest, repo, file = resolve_model(cfg, home)
+    if repo is None or dest.exists():
+        return dest
+    if not cfg.model_repo:  # a built-in preset: the catalog's pinned, verified copy when it has one
+        from . import models
+        model = models.llm_for_file(file)
+        if model is not None and model.pinned:
+            log.info("Downloading %s (verified), first run only ...", file)
+            try:
+                models.download_blocking(model, home)
+            except models.ModelError as e:
+                raise SystemExit(str(e)) from e
+            return dest
+        if model is not None and file not in models.LEGACY_UNPINNED:
+            raise SystemExit(f"Parley has no verified copy of the {file} model yet, so it will not download one.")
+    log.info("Downloading %s from %s (not verified by Parley), first run only ...", file, repo)
+    download(f"https://huggingface.co/{repo}/resolve/main/{file}", dest)
     return dest
 
 

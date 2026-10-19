@@ -93,6 +93,8 @@ def _url_ok(url: object, hosts: frozenset[str] | set[str], http_local: bool) -> 
         raise PackError(f"download host not allowed: {host}")
     if u.scheme != "https" and not (http_local and u.scheme == "http" and host in ("127.0.0.1", "localhost")):
         raise PackError("downloads need https")
+    if u.scheme == "https" and u.port not in (None, 443):
+        raise PackError("download port not allowed")
     return url
 
 
@@ -180,14 +182,15 @@ def usable_dir(home: Path, manifest: Manifest | None = None) -> Path | None:
 
 def make_opener(allowed_hosts: frozenset[str] | set[str] = ALLOWED_HOSTS, *, _allow_http_localhost: bool = False):
     """open_stream(url) for `download_verified`: certificate checks, no automatic redirects, redirects only to allowed
-    https hosts, overall deadline and minimum rate (update._Paced)."""
+    https hosts, overall deadline and minimum rate (update._Paced). `open_stream(url, headers)` also takes extra request
+    headers (a `Range` for a resumed download); no other header, and never credentials, is sent."""
     @contextmanager
-    def open_stream(url: str):
-        headers = {"User-Agent": f"parley/{__version__} cuda-pack"}
-        with httpx.Client(timeout=update.TIMEOUT, follow_redirects=False, headers=headers) as client:
+    def open_stream(url: str, headers: dict[str, str] | None = None):
+        base = {"User-Agent": f"parley/{__version__} cuda-pack"}
+        with httpx.Client(timeout=update.TIMEOUT, follow_redirects=False, headers=base) as client:
             for _ in range(MAX_REDIRECTS + 1):
                 _url_ok(url, allowed_hosts, _allow_http_localhost)
-                r = client.send(client.build_request("GET", url), stream=True)
+                r = client.send(client.build_request("GET", url, headers=headers), stream=True)
                 if r.is_redirect:
                     loc = r.headers.get("location")
                     r.close()
